@@ -220,81 +220,44 @@ static void show_custom_terminal_flow(const char *title, const char **lines, con
 // 1. YES 360 / AIMBOT 180 AUTO-SEARCH ENGINE
 // =============================================================================
 
-typedef struct {
-    double from_val;
-    double to_val;
-} search_args_t;
+#include <dlfcn.h>
 
-static void *background_memory_scanner(void *arg) {
-    search_args_t *args = (search_args_t *)arg;
-    if (!args) return NULL;
-    double from_val = args->from_val;
-    double to_val = args->to_val;
-    free(args);
+typedef bool (*patchOffset_fn)(uint64_t offset, uint32_t opcode);
 
-    mach_port_t task = mach_task_self();
-    mach_vm_address_t address = 0x10000000;
-    mach_vm_size_t size = 0;
-    vm_region_basic_info_data_64_t info;
-    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-    mach_port_t object_name = MACH_PORT_NULL;
-
-    uint64_t from_bits, to_bits;
-    memcpy(&from_bits, &from_val, sizeof(double));
-    memcpy(&to_bits, &to_val, sizeof(double));
-
-    #define SCAN_CHUNK_SIZE 16384
-    uint8_t buf[SCAN_CHUNK_SIZE];
-
-    while (address < 0x300000000) {
-        count = VM_REGION_BASIC_INFO_COUNT_64;
-        if (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
-                           (vm_region_info_t)&info, &count, &object_name) != KERN_SUCCESS) {
-            break;
-        }
-
-        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) &&
-            !(info.protection & VM_PROT_EXECUTE) && size <= (32 * 1024 * 1024)) {
-            mach_vm_size_t offset = 0;
-            while (offset < size) {
-                mach_vm_size_t chunk = (size - offset > SCAN_CHUNK_SIZE) ? SCAN_CHUNK_SIZE : (size - offset);
-                mach_vm_size_t bytes_read = 0;
-                if (mach_vm_read_overwrite(task, address + offset, chunk, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
-                    for (mach_vm_size_t i = 0; i + sizeof(uint64_t) <= bytes_read; i += 4) {
-                        uint64_t v;
-                        memcpy(&v, buf + i, sizeof(uint64_t));
-                        if (v == from_bits) {
-                            mach_vm_write(task, address + offset + i, (vm_offset_t)&to_bits, sizeof(uint64_t));
-                        }
-                    }
-                }
-                offset += chunk;
-            }
-        }
-        address += size;
+static void safe_patch_instruction(uint64_t offset, uint32_t opcode) {
+    patchOffset_fn fn = (patchOffset_fn)dlsym(RTLD_DEFAULT, "_Z11patchOffsetxj");
+    if (fn) {
+        fn(offset, opcode);
+        return;
     }
-    return NULL;
+
+    // Direct fallback if patchOffset is not yet linked
+    intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    mach_port_t task = mach_task_self();
+    mach_vm_address_t code_addr = (mach_vm_address_t)(slide + offset);
+    uint32_t swapped = __builtin_bswap32(opcode);
+
+    if (vm_protect(task, code_addr, 4, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
+        vm_write(task, code_addr, (vm_offset_t)&swapped, 4);
+        vm_protect(task, code_addr, 4, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
+    }
 }
 
 static void apply_aimbot_angle(double new_val, double old_val, uint32_t patch_opcode) {
     intptr_t slide = _dyld_get_image_vmaddr_slide(0);
     mach_port_t task = mach_task_self();
 
-    // 1. Original game binary instruction hook at slide + 0x10272ca44
-    mach_vm_address_t code_addr = (mach_vm_address_t)(slide + 0x10272ca44);
-    if (vm_protect(task, code_addr, 4, FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
-        vm_write(task, code_addr, (vm_offset_t)&patch_opcode, 4);
-        vm_protect(task, code_addr, 4, FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
-    }
+    // 1. Safe instruction patch
+    safe_patch_instruction(0x10272ca44, patch_opcode);
 
-    // 2. Game binary constant at slide + 0x102a371f0
+    // 2. Game binary camera angle constant at slide + 0x102a371f0
     mach_vm_address_t const_addr = (mach_vm_address_t)(slide + 0x102a371f0);
     if (vm_protect(task, const_addr, sizeof(double), FALSE, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == KERN_SUCCESS) {
         vm_write(task, const_addr, (vm_offset_t)&new_val, sizeof(double));
         vm_protect(task, const_addr, sizeof(double), FALSE, VM_PROT_READ | VM_PROT_EXECUTE);
     }
 
-    // 3. Active instance field at *(slide + 0x103a88060) + 0x10 (field 106D67F0)
+    // 3. Active camera instance field at *(slide + 0x103a88060) + 0x10
     mach_vm_address_t ptr_loc = (mach_vm_address_t)(slide + 0x103a88060);
     vm_offset_t data_read = 0;
     mach_msg_type_number_t count = 0;
@@ -304,19 +267,6 @@ static void apply_aimbot_angle(double new_val, double old_val, uint32_t patch_op
         if (obj_ptr > 0x10000000 && obj_ptr < 0x300000000 && (obj_ptr & 0x7) == 0) {
             mach_vm_address_t field_addr = (mach_vm_address_t)(obj_ptr + 0x10);
             vm_write(task, field_addr, (vm_offset_t)&new_val, sizeof(double));
-        }
-    }
-
-    // 4. Automated memory search & replace (mirrors DLG double search & modify)
-    search_args_t *args = (search_args_t *)malloc(sizeof(search_args_t));
-    if (args) {
-        args->from_val = old_val;
-        args->to_val = new_val;
-        pthread_t t;
-        if (pthread_create(&t, NULL, background_memory_scanner, args) == 0) {
-            pthread_detach(t);
-        } else {
-            free(args);
         }
     }
 }
@@ -446,7 +396,8 @@ static void *background_igg_aimlock_scanner(void *arg) {
                             if (v == BIT_999M || v == BIT_9M) {
                                 // Anchor found! Search nearby window [-256, +256]
                                 mach_vm_size_t w_start = (i >= 256) ? (i - 256) : 0;
-                                mach_vm_size_t w_end = (i + 256 + 8 <= bytes_read) ? (i + 256) : (bytes_read - 8);
+                                mach_vm_size_t max_bound = (bytes_read >= 8) ? (bytes_read - 8) : 0;
+                                mach_vm_size_t w_end = (i + 256 <= max_bound) ? (i + 256) : max_bound;
                                 
                                 mach_vm_address_t a800 = 0, a10 = 0, a1 = 0, a2 = 0, a30 = 0, a01 = 0;
                                 for (mach_vm_size_t j = w_start; j <= w_end; j += 4) {
@@ -496,7 +447,8 @@ static void *background_igg_aimlock_scanner(void *arg) {
                             if (v == BIT_0_5) {
                                 // Anchor found! Search nearby window [-128, +128]
                                 mach_vm_size_t w_start = (i >= 128) ? (i - 128) : 0;
-                                mach_vm_size_t w_end = (i + 128 + 8 <= bytes_read) ? (i + 128) : (bytes_read - 8);
+                                mach_vm_size_t max_bound = (bytes_read >= 8) ? (bytes_read - 8) : 0;
+                                mach_vm_size_t w_end = (i + 128 <= max_bound) ? (i + 128) : max_bound;
 
                                 int matched_count = 0;
                                 mach_vm_address_t matched_addrs[16];
