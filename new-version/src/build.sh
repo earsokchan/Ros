@@ -68,7 +68,7 @@ cp "$ROOT_DIR/ROS_ikhozzzz_rootless_v2.6.0_Yes360.deb" "$ROOT_DIR/../ROS_ikhozzz
 rm -rf "$TMP_RL"
 
 # 4. Build Rootful Debian Package
-echo "[4/4] Building Rootful .deb package..."
+echo "[4/5] Building Rootful .deb package..."
 TMP_RF="/tmp/deb_build_rootful"
 rm -rf "$TMP_RF"
 mkdir -p "$TMP_RF/control"
@@ -96,6 +96,40 @@ find "$TMP_RF" -name "._*" -delete || true
 ar -cr "$ROOT_DIR/ROS_ikhozzzz_rootful_v2.6.0_Yes360.deb" "$TMP_RF/debian-binary" "$TMP_RF/control.tar.xz" "$TMP_RF/data.tar.xz"
 rm -rf "$TMP_RF"
 
+# 5. Patch rosauthhook.dylib (remove RosLegacy popup & content gate) and update IPAs
+echo "[5/5] Patching rosauthhook.dylib & updating IPAs..."
+TMP_IPA_UPDATE="/tmp/ipa_patch_stage"
+rm -rf "$TMP_IPA_UPDATE"
+mkdir -p "$TMP_IPA_UPDATE/Payload/client.app/Frameworks"
+
+cp "$DIR/aimbot_auto.dylib" "$TMP_IPA_UPDATE/Payload/client.app/Frameworks/aimbot_auto.dylib"
+install_name_tool -id "@executable_path/Frameworks/aimbot_auto.dylib" "$TMP_IPA_UPDATE/Payload/client.app/Frameworks/aimbot_auto.dylib"
+codesign -f -s - "$TMP_IPA_UPDATE/Payload/client.app/Frameworks/aimbot_auto.dylib"
+
+python3 -c "
+import zipfile
+with zipfile.ZipFile('$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa', 'r') as z:
+    hook_data = bytearray(z.read('Payload/client.app/rosauthhook.dylib'))
+
+# 0xFA24: C0 03 5F D6 (ret for _ros_content_install - bypasses content gate popup)
+hook_data[0xFA24:0xFA28] = b'\xc0\x03\x5f\xd6'
+# 0xE238: C0 03 5F D6 (ret for _ros_begin_login - bypasses login window popup)
+hook_data[0xE238:0xE23C] = b'\xc0\x03\x5f\xd6'
+# 0x5414: 1F 20 03 D5 (nop for cbz in _ros_ntLogin - completes login directly)
+hook_data[0x5414:0x5418] = b'\x1f\x20\x03\xd5'
+
+with open('$TMP_IPA_UPDATE/Payload/client.app/rosauthhook.dylib', 'wb') as f:
+    f.write(hook_data)
+"
+
+install_name_tool -id "@executable_path/rosauthhook.dylib" "$TMP_IPA_UPDATE/Payload/client.app/rosauthhook.dylib"
+codesign -f -s - "$TMP_IPA_UPDATE/Payload/client.app/rosauthhook.dylib"
+
+# Update both IPAs
+(cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" Payload/client.app/Frameworks/aimbot_auto.dylib Payload/client.app/rosauthhook.dylib)
+(cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" Payload/client.app/Frameworks/aimbot_auto.dylib Payload/client.app/rosauthhook.dylib)
+rm -rf "$TMP_IPA_UPDATE"
+
 echo "==============================================="
-echo "   Build Complete! All packages updated.       "
+echo "   Build Complete! All packages & IPAs updated "
 echo "==============================================="

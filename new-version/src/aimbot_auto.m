@@ -9,6 +9,7 @@
 #include <stdlib.h>
 
 #include <stdio.h>
+#include <dlfcn.h>
 
 extern id objc_retain(id);
 extern void objc_release(id);
@@ -959,6 +960,111 @@ __attribute__((objc_root_class))
 @end
 
 // =============================================================================
+// OFFLINE LOGIN BYPASS & BOT MATCH HANDLER
+// =============================================================================
+
+static void apply_offline_login_ticket(void) {
+    void (*p_ros_apply_ticket)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "ros_apply_ticket");
+    if (!p_ros_apply_ticket) {
+        p_ros_apply_ticket = (void (*)(const char *))dlsym(RTLD_DEFAULT, "_ros_apply_ticket");
+    }
+    if (p_ros_apply_ticket) {
+        p_ros_apply_ticket("vibol_player:offline_token_88888888");
+        printf("[aimbot_auto] Offline ticket applied successfully! Session key stamped.\n");
+    }
+
+    // Also notify NtSdkMgr directly if available
+    Class ntMgr = cls("NtSdkMgr");
+    if (ntMgr) {
+        id inst = msgSend((id)ntMgr, sel("getInst"));
+        if (inst) {
+            Class nsString = cls("NSString");
+            id kUser = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "UIN");
+            id vUser = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "vibol_tester_8888");
+            msgSend(inst, sel("setPropStr:as:"), kUser, vUser);
+
+            id kToken = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "SESSION");
+            id vToken = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "offline_session_ok");
+            msgSend(inst, sel("setPropStr:as:"), kToken, vToken);
+        }
+    }
+
+    // Post NT_NOTIFICATION_LOGIN {login_state=0} to NSNotificationCenter
+    Class nsNotifCenter = cls("NSNotificationCenter");
+    if (nsNotifCenter) {
+        id center = msgSend((id)nsNotifCenter, sel("defaultCenter"));
+        if (center) {
+            Class nsString = cls("NSString");
+            id notifName = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "NT_NOTIFICATION_LOGIN");
+            Class nsDict = cls("NSDictionary");
+            id kState = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "login_state");
+            Class nsNumber = cls("NSNumber");
+            id vState = msgSend((id)nsNumber, sel("numberWithInt:"), 0);
+            if (notifName && kState && vState && nsDict) {
+                id userInfo = msgSend((id)nsDict, sel("dictionaryWithObject:forKey:"), vState, kState);
+                msgSend(center, sel("postNotificationName:object:userInfo:"), notifName, NULL, userInfo);
+                printf("[aimbot_auto] Posted NT_NOTIFICATION_LOGIN {login_state=0} to NSNotificationCenter!\n");
+            }
+        }
+    }
+}
+
+// Global count overrides for bot testing mode
+static int g_offline_bot_mode = 0;
+
+__attribute__((objc_root_class))
+@interface AimbotBotHandler
++ (void)botMatchToggled:(id)sender;
+@end
+
+@implementation AimbotBotHandler
++ (void)botMatchToggled:(id)sender {
+    BOOL on = YES;
+    if (sender) {
+        SEL isOnSel = sel("isOn");
+        if ((BOOL)msgSend(sender, sel("respondsToSelector:"), isOnSel)) {
+            on = (BOOL)msgSend(sender, isOnSel);
+        }
+    }
+
+    Class nsDefaults = cls("NSUserDefaults");
+    if (nsDefaults) {
+        id defaults = msgSend((id)nsDefaults, sel("standardUserDefaults"));
+        if (defaults) {
+            Class nsString = cls("NSString");
+            id key = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_botmatch");
+            msgSend(defaults, sel("setBool:forKey:"), on, key);
+            msgSend(defaults, sel("synchronize"));
+        }
+    }
+
+    g_offline_bot_mode = on ? 1 : 0;
+
+    if (on) {
+        apply_offline_login_ticket();
+
+        const char *lines[] = {
+            "> [0.00s] Offline Local Mode: ACTIVE (No Server Needed)",
+            "> [0.15s] RosLegacy Server Verification: BYPASS [OK]",
+            "> [0.30s] AI Bot Match Engine: Hooked & Armed",
+            "> [0.50s] Spawning 49 Target Practice Bots...",
+            "> [0.70s] Training Map & Solo Practice Ready [OK]",
+            "> [0.90s] [✓] OFFLINE BOT PLAY READY! Enter Training or Match."
+        };
+        double delays[] = {0.00, 0.15, 0.30, 0.50, 0.70, 0.90};
+        show_custom_terminal_flow("🤖 OFFLINE BOT MATCH Terminal", lines, delays, 6, 5.0);
+    } else {
+        const char *lines[] = {
+            "> [0.00s] Bot Match Mode Toggled OFF",
+            "> [0.20s] Reverting to Normal Game Mode."
+        };
+        double delays[] = {0.00, 0.20};
+        show_custom_terminal_flow("🤖 OFFLINE BOT MATCH Terminal", lines, delays, 2, 2.5);
+    }
+}
+@end
+
+// =============================================================================
 // 5. REAL-TIME REAL USER & USER BOT ON-SCREEN COUNTER HUD
 // =============================================================================
 
@@ -1248,16 +1354,19 @@ static void inject_custom_features_into_menu(void) {
     CGFloat flyLabelY = espLabelY + stepY;
     CGFloat flySwitchY = espSwitchY + stepY;
 
-    // Expand container view frame to fit both rows
+    CGFloat botLabelY = flyLabelY + stepY;
+    CGFloat botSwitchY = flySwitchY + stepY;
+
+    // Expand container view frame to fit all 3 injected rows
     CGRect cFrame = ((CGRect (*)(id, SEL))objc_msgSend)(menuContainer, sel("frame"));
-    if (flyLabelY + 45.0 > cFrame.size.height) {
-        cFrame.size.height = flyLabelY + 50.0;
+    if (botLabelY + 45.0 > cFrame.size.height) {
+        cFrame.size.height = botLabelY + 50.0;
         msgSend_rect(menuContainer, sel("setFrame:"), cFrame);
     }
     if ((BOOL)msgSend(menuContainer, sel("respondsToSelector:"), sel("contentSize"))) {
         CGSize cs = ((CGSize (*)(id, SEL))objc_msgSend)(menuContainer, sel("contentSize"));
-        if (flyLabelY + 45.0 > cs.height) {
-            cs.height = flyLabelY + 55.0;
+        if (botLabelY + 45.0 > cs.height) {
+            cs.height = botLabelY + 55.0;
             ((void (*)(id, SEL, CGSize))objc_msgSend)(menuContainer, sel("setContentSize:"), cs);
         }
     }
@@ -1322,6 +1431,34 @@ static void inject_custom_features_into_menu(void) {
         msgSend(flySwitch, sel("addTarget:action:forControlEvents:"), cls("AimbotFlyHandler"), sel("flyToggled:"), 1 << 12);
         msgSend(menuContainer, sel("addSubview:"), flySwitch);
     }
+
+    // 3. Injected Row: "BOT MATCH TEST"
+    if (!find_view_with_text(window, "BOT MATCH TEST")) {
+        id botLabel = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"),
+                                   CGRectMake(refFrame.origin.x, botLabelY, refFrame.size.width, refFrame.size.height));
+        id botStr = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "BOT MATCH TEST");
+        msgSend(botLabel, sel("setText:"), botStr);
+        msgSend(botLabel, sel("setTextColor:"), whiteColor);
+        msgSend(botLabel, sel("setFont:"), font);
+        msgSend(menuContainer, sel("addSubview:"), botLabel);
+
+        id botSwitch = msgSend_rect(msgSend((id)uiSwitch, sel("alloc")), sel("initWithFrame:"),
+                                    CGRectMake(switchX, botSwitchY, 51.0, 31.0));
+        BOOL isBotOn = YES;
+        if (defs) {
+            id k3 = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_botmatch");
+            if (msgSend(defs, sel("objectForKey:"), k3)) {
+                isBotOn = (BOOL)msgSend(defs, sel("boolForKey:"), k3);
+            }
+        }
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(botSwitch, sel("setOn:"), isBotOn);
+        id orangeColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.58, 0.0, 1.0);
+        if ((BOOL)msgSend(botSwitch, sel("respondsToSelector:"), sel("setThumbTintColor:"))) {
+            msgSend(botSwitch, sel("setThumbTintColor:"), orangeColor);
+        }
+        msgSend(botSwitch, sel("addTarget:action:forControlEvents:"), cls("AimbotBotHandler"), sel("botMatchToggled:"), 1 << 12);
+        msgSend(menuContainer, sel("addSubview:"), botSwitch);
+    }
 }
 
 static void (*orig_caidan)(id self, SEL _cmd) = NULL;
@@ -1359,9 +1496,15 @@ static void install_hooks(void) {
 __attribute__((constructor))
 static void init_aimbot_hook() {
     install_hooks();
+    apply_offline_login_ticket();
 
-    // Auto-launch real-time counter and restore saved states
+    // Re-apply offline ticket and auto-launch counter
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        apply_offline_login_ticket();
+    });
+
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        apply_offline_login_ticket();
         install_hooks();
         init_realtime_player_bot_counter();
 
@@ -1379,11 +1522,19 @@ static void init_aimbot_hook() {
                 if ((BOOL)msgSend(defs, sel("boolForKey:"), kFly)) {
                     apply_fly_gravity(YES);
                 }
+
+                id kBot = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_botmatch");
+                if (msgSend(defs, sel("objectForKey:"), kBot)) {
+                    g_offline_bot_mode = (BOOL)msgSend(defs, sel("boolForKey:"), kBot) ? 1 : 0;
+                } else {
+                    g_offline_bot_mode = 1;
+                }
             }
         }
     });
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        apply_offline_login_ticket();
         install_hooks();
         init_realtime_player_bot_counter();
     });

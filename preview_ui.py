@@ -102,7 +102,8 @@ class GameScreenPreview(tk.Tk):
             "AIMBOT 360": False,
             "AIMBOT 180": False,
             "ESP LINE": True,   # Default ON for demo
-            "FLY": False
+            "FLY": False,
+            "BOT MATCH TEST": True
         }
         
         # Player and Bot Count Simulation
@@ -437,6 +438,7 @@ class GameScreenPreview(tk.Tk):
             ("AIMBOT 180", "180° frontal sweep auto-aim", "AIMBOT 180"),
             ("ESP LINE", "Antenna Sky Beams to all enemies", "ESP LINE"),
             ("FLY", "Zero-gravity sky walker flight mode", "FLY"),
+            ("BOT MATCH TEST", "Offline Solo AI Practice (No Server)", "BOT MATCH TEST"),
         ]
 
         for i, (name, desc, key) in enumerate(feature_list):
@@ -449,7 +451,7 @@ class GameScreenPreview(tk.Tk):
             text_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
             
             # Badge icon / indicator
-            prefix = "⭐ " if "360" in key or "ESP" in key or "FLY" in key else "• "
+            prefix = "⭐ " if "360" in key or "ESP" in key or "FLY" in key or "BOT" in key else "• "
             lbl_name = tk.Label(
                 text_frame, text=f"{prefix}{name}", bg=row_bg, fg="#FFFFFF" if "360" not in key else "#00FFCC",
                 font=("Arial", 10, "bold"), anchor="w"
@@ -502,6 +504,16 @@ class GameScreenPreview(tk.Tk):
             else:
                 self.log_message("MOD", "Physics gravity restored to 9.8m/s²")
                 self.altitude = 0.0
+        elif key == "BOT MATCH TEST":
+            if state:
+                self.log_message("MOD", "Offline Mode ACTIVE: Bypassed RosLegacy login server")
+                self.log_message("MOD", "AI Bot Practice Environment Loaded: 49 Bots spawned")
+                self.real_players = 1
+                self.bot_players = 49
+                self.total_players = 50
+                self.update_counter_labels()
+            else:
+                self.log_message("MOD", "Bot match mode toggled off")
         elif key == "HIGH SCOPE":
             if state:
                 self.log_message("MOD", "Camera FOV set to 8x Sniper zoom")
