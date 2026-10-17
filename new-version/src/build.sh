@@ -14,7 +14,7 @@ echo "==============================================="
 
 # 1. Compile aimbot_auto.dylib
 echo "[1/4] Compiling aimbot_auto.dylib..."
-clang -target arm64-apple-ios14.0 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
+clang -target arm64-apple-ios9.0 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
     -dynamiclib -lobjc -O2 \
     "$DIR/aimbot_auto.m" -o "$DIR/aimbot_auto.dylib"
 
@@ -96,26 +96,87 @@ find "$TMP_RF" -name "._*" -delete || true
 ar -cr "$ROOT_DIR/ROS_ikhozzzz_rootful_v2.6.0_Yes360.deb" "$TMP_RF/debian-binary" "$TMP_RF/control.tar.xz" "$TMP_RF/data.tar.xz"
 rm -rf "$TMP_RF"
 
-# 5. Compile clean offline rosauthhook.dylib & update IPAs
-echo "[5/5] Compiling clean offline rosauthhook.dylib & updating IPAs..."
+# 5. Update IPAs with clean client & aimbot_auto.dylib and valid bundle CodeSignature
+echo "[5/5] Updating IPAs with clean client, aimbot_auto.dylib & verified CodeSignature..."
 TMP_IPA_UPDATE="/tmp/ipa_patch_stage"
 rm -rf "$TMP_IPA_UPDATE"
-mkdir -p "$TMP_IPA_UPDATE/Payload/client.app/Frameworks"
+mkdir -p "$TMP_IPA_UPDATE"
 
-cp "$DIR/aimbot_auto.dylib" "$TMP_IPA_UPDATE/Payload/client.app/Frameworks/aimbot_auto.dylib"
-install_name_tool -id "@executable_path/Frameworks/aimbot_auto.dylib" "$TMP_IPA_UPDATE/Payload/client.app/Frameworks/aimbot_auto.dylib"
-codesign -f -s - "$TMP_IPA_UPDATE/Payload/client.app/Frameworks/aimbot_auto.dylib"
+python3 -c "
+import zipfile, os, shutil, subprocess
 
-clang -target arm64-apple-ios14.0 -isysroot /Library/Developer/CommandLineTools/SDKs/MacOSX.sdk \
-    -dynamiclib -lobjc -O2 "$DIR/rosauthhook.m" -o "$TMP_IPA_UPDATE/Payload/client.app/rosauthhook.dylib"
-install_name_tool -id "@executable_path/rosauthhook.dylib" "$TMP_IPA_UPDATE/Payload/client.app/rosauthhook.dylib"
-codesign -f -s - "$TMP_IPA_UPDATE/Payload/client.app/rosauthhook.dylib"
+base_ipa = '$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa'
+stage = '$TMP_IPA_UPDATE'
+app_dir = os.path.join(stage, 'Payload/client.app')
+fw_dir = os.path.join(app_dir, 'Frameworks')
 
-# Update both IPAs
-(cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" Payload/client.app/Frameworks/aimbot_auto.dylib Payload/client.app/rosauthhook.dylib)
-(cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" Payload/client.app/Frameworks/aimbot_auto.dylib Payload/client.app/rosauthhook.dylib)
+print('Extracting base IPA for complete bundle signing...')
+with zipfile.ZipFile(base_ipa, 'r') as z:
+    z.extractall(stage)
+
+# Copy new aimbot_auto.dylib
+src_aimbot = '$DIR/aimbot_auto.dylib'
+dst_aimbot = os.path.join(fw_dir, 'aimbot_auto.dylib')
+os.makedirs(fw_dir, exist_ok=True)
+shutil.copy(src_aimbot, dst_aimbot)
+
+# Remove any old rosauthhook.dylib
+old_auth = os.path.join(app_dir, 'rosauthhook.dylib')
+if os.path.exists(old_auth):
+    os.remove(old_auth)
+
+# 1. Update Info.plist FIRST before signing binary or bundle
+plist_path = os.path.join(app_dir, 'Info.plist')
+subprocess.run(['plutil', '-replace', 'MinimumOSVersion', '-string', '11.0', plist_path], check=True)
+
+# 2. Patch client binary load commands
+client_path = os.path.join(app_dir, 'client')
+subprocess.run(['install_name_tool', '-change', '@executable_path/rosauthhook.dylib', '/usr/lib/libSystem.B.dylib', client_path], check=True)
+
+# 3. Configure dylib install names & sign frameworks
+subprocess.run(['install_name_tool', '-id', '@executable_path/Frameworks/aimbot_auto.dylib', dst_aimbot], check=True)
+subprocess.run(['codesign', '-f', '-s', '-', dst_aimbot], check=True)
+
+ros_dylib = os.path.join(fw_dir, 'ros.dylib')
+if os.path.exists(ros_dylib):
+    subprocess.run(['install_name_tool', '-id', '@executable_path/Frameworks/ros.dylib', ros_dylib], check=True)
+    subprocess.run(['codesign', '-f', '-s', '-', ros_dylib], check=True)
+
+# 4. Sign the entire app bundle (creates valid CodeResources and seals Info.plist hash into client)
+print('Codesigning full Payload/client.app bundle...')
+subprocess.run(['codesign', '-f', '-s', '-', app_dir], check=True)
+
+# 5. Verify bundle integrity
+res = subprocess.run(['codesign', '-v', '-vvv', app_dir], capture_output=True, text=True)
+print('Codesign bundle verification:')
+print(res.stderr if res.stderr else 'OK')
+if res.returncode != 0:
+    raise RuntimeError('Bundle codesign verification failed!')
+"
+
+# Remove any old rosauthhook.dylib from both IPAs
+zip -d "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" "Payload/client.app/rosauthhook.dylib" 2>/dev/null || true
+zip -d "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" "Payload/client.app/rosauthhook.dylib" 2>/dev/null || true
+
+# Update both IPAs with clean client, Info.plist, aimbot_auto.dylib, ros.dylib, and _CodeSignature
+echo "Updating IPAs with verified bundle components..."
+(cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" \
+    Payload/client.app/client \
+    Payload/client.app/Info.plist \
+    Payload/client.app/Frameworks/aimbot_auto.dylib \
+    Payload/client.app/Frameworks/ros.dylib \
+    Payload/client.app/_CodeSignature/CodeResources)
+
+(cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" \
+    Payload/client.app/client \
+    Payload/client.app/Info.plist \
+    Payload/client.app/Frameworks/aimbot_auto.dylib \
+    Payload/client.app/Frameworks/ros.dylib \
+    Payload/client.app/_CodeSignature/CodeResources)
+
 rm -rf "$TMP_IPA_UPDATE"
 
 echo "==============================================="
 echo "   Build Complete! All packages & IPAs updated "
 echo "==============================================="
+

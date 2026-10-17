@@ -1420,7 +1420,59 @@ static void custom_caidan(id self, SEL _cmd) {
     });
 }
 
+static void custom_ntLogin(id self, SEL _cmd) {
+    printf("[aimbot_auto] ntLogin intercepted! Bypassing all network auth & setting offline session...\n");
+
+    Class ntMgr = cls("NtSdkMgr");
+    if (ntMgr) {
+        id inst = msgSend((id)ntMgr, sel("getInst"));
+        if (inst) {
+            Class nsString = cls("NSString");
+            id kUser = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "UIN");
+            id vUser = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "vibol_offline_tester");
+            msgSend(inst, sel("setPropStr:as:"), kUser, vUser);
+
+            id kToken = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "SESSION");
+            id vToken = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "offline_token_ok");
+            msgSend(inst, sel("setPropStr:as:"), kToken, vToken);
+        }
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        Class nsNotifCenter = cls("NSNotificationCenter");
+        if (nsNotifCenter) {
+            id center = msgSend((id)nsNotifCenter, sel("defaultCenter"));
+            if (center) {
+                Class nsString = cls("NSString");
+                id notifName = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "NT_NOTIFICATION_LOGIN");
+                Class nsDict = cls("NSDictionary");
+                id kState = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "login_state");
+                Class nsNumber = cls("NSNumber");
+                id vState = msgSend((id)nsNumber, sel("numberWithInt:"), 0);
+                if (notifName && kState && vState && nsDict) {
+                    id userInfo = msgSend((id)nsDict, sel("dictionaryWithObject:forKey:"), vState, kState);
+                    msgSend(center, sel("postNotificationName:object:userInfo:"), notifName, NULL, userInfo);
+                    printf("[aimbot_auto] Posted NT_NOTIFICATION_LOGIN {login_state=0} successfully!\n");
+                }
+            }
+        }
+    });
+}
+
+static void install_offline_login_hook(void) {
+    Class ntSdkBase = cls("NtSdkBase");
+    if (ntSdkBase) {
+        Method m = class_getInstanceMethod(ntSdkBase, sel("ntLogin"));
+        if (m) {
+            method_setImplementation(m, (IMP)custom_ntLogin);
+            printf("[aimbot_auto] Successfully hooked NtSdkBase ntLogin -> Offline Mode Active!\n");
+        }
+    }
+}
+
 static void install_hooks(void) {
+    install_offline_login_hook();
+
     Class metaCls = objc_getMetaClass("NSObject");
     if (metaCls) {
         class_replaceMethod(metaCls, sel("feature3:"), (IMP)custom_feature3, "v@:@");
