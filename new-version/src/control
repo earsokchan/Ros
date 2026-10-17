@@ -1,0 +1,13 @@
+Package: com.ros.ikhozzzz
+Name: ROS Hack By ikhozzzz!
+Depends: mobilesubstrate
+Architecture: iphoneos-arm64
+Description: ROS Hack Mod Menu by ikhozzzz with Yes360 Auto-Search & On-Screen Terminal Flow (Safe & Stable)
+Maintainer: ikhozzzz
+Author: ikhozzzz
+Section: Tweaks
+Version: 2.6.0
+Conflicts: com.ros.lengzz
+Replaces: com.ros.lengzz
+Provides: com.ros.lengzz
+Installed-Size: 1360
