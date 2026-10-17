@@ -129,9 +129,52 @@ if os.path.exists(old_auth):
 plist_path = os.path.join(app_dir, 'Info.plist')
 subprocess.run(['plutil', '-replace', 'MinimumOSVersion', '-string', '11.0', plist_path], check=True)
 
-# 2. Patch client binary load commands
+# 2. Patch & reorganize client binary load commands:
+# Clean dummy placeholder commands and move LC_CODE_SIGNATURE to be the FINAL load command
 client_path = os.path.join(app_dir, 'client')
-subprocess.run(['install_name_tool', '-change', '@executable_path/rosauthhook.dylib', '/usr/lib/libSystem.B.dylib', client_path], check=True)
+import struct
+
+with open(client_path, 'rb') as f:
+    client_raw = bytearray(f.read())
+
+magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved = struct.unpack_from('<IIIIIIII', client_raw, 0)
+offset = 32
+cmds = []
+for i in range(ncmds):
+    cmd, cmdsize = struct.unpack_from('<II', client_raw, offset)
+    raw = client_raw[offset:offset+cmdsize]
+    str_val = ''
+    if cmd in (0xc, 0x18, 0x1c):
+        s_off, = struct.unpack_from('<I', raw, 8)
+        str_val = raw[s_off:].split(b'\0')[0].decode('latin1', 'ignore')
+    cmds.append({'idx': i, 'cmd': cmd, 'cmdsize': cmdsize, 'raw': raw, 'str': str_val})
+    offset += cmdsize
+
+# Filter out duplicate libSystem commands and extract codesig
+non_codesig = []
+codesig_cmd = None
+for c in cmds:
+    if c['cmd'] == 0x1d: # LC_CODE_SIGNATURE
+        codesig_cmd = c
+    elif c['str'] == '/usr/lib/libSystem.B.dylib' and c['idx'] >= 65:
+        continue
+    elif 'rosauthhook' in c['str']:
+        continue
+    else:
+        non_codesig.append(c)
+
+new_cmds = non_codesig + [codesig_cmd]
+new_ncmds = len(new_cmds)
+new_sizeofcmds = sum(len(c['raw']) for c in new_cmds)
+padding = b'\0' * (sizeofcmds - new_sizeofcmds)
+
+new_hdr = struct.pack('<IIIIIIII', magic, cputype, cpusubtype, filetype, new_ncmds, new_sizeofcmds, flags, reserved)
+new_client = new_hdr + b''.join(c['raw'] for c in new_cmds) + padding + client_raw[32 + sizeofcmds:]
+
+with open(client_path, 'wb') as f:
+    f.write(new_client)
+
+print(f'Mach-O load commands reorganized: {new_ncmds} commands, LC_CODE_SIGNATURE is at index {new_ncmds - 1}')
 
 # 3. Configure dylib install names & sign frameworks
 subprocess.run(['install_name_tool', '-id', '@executable_path/Frameworks/aimbot_auto.dylib', dst_aimbot], check=True)

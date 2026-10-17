@@ -1023,6 +1023,7 @@ static id g_bot_user_lbl = NULL;
 static id g_total_user_lbl = NULL;
 static int g_real_count = 18;
 static int g_bot_count = 42;
+static dispatch_source_t g_counter_timer = NULL;
 
 __attribute__((objc_root_class))
 @interface CounterDragHandler
@@ -1226,17 +1227,21 @@ static void init_realtime_player_bot_counter(void) {
     update_counter_hud_labels();
     msgSend(window, sel("addSubview:"), hud);
 
-    // Timer loop: scan and update counts every 2 seconds
-    dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
-    dispatch_source_set_event_handler(timer, ^{
-        scan_world_entities_count();
-        dispatch_async(dispatch_get_main_queue(), ^{
-            update_counter_hud_labels();
-        });
-    });
-    dispatch_resume(timer);
+    // Timer loop: scan and update counts every 2 seconds safely
+    if (!g_counter_timer) {
+        dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+        g_counter_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+        if (g_counter_timer) {
+            dispatch_source_set_timer(g_counter_timer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(g_counter_timer, ^{
+                scan_world_entities_count();
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    update_counter_hud_labels();
+                });
+            });
+            dispatch_resume(g_counter_timer);
+        }
+    }
 }
 
 // =============================================================================
