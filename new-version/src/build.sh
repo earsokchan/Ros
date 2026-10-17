@@ -150,15 +150,15 @@ for i in range(ncmds):
     cmds.append({'idx': i, 'cmd': cmd, 'cmdsize': cmdsize, 'raw': raw, 'str': str_val})
     offset += cmdsize
 
-# Filter out duplicate libSystem commands and extract codesig
+# Filter out ros.dylib, rosauthhook, and duplicate libSystem commands
 non_codesig = []
 codesig_cmd = None
 for c in cmds:
     if c['cmd'] == 0x1d: # LC_CODE_SIGNATURE
         codesig_cmd = c
-    elif c['str'] == '/usr/lib/libSystem.B.dylib' and c['idx'] >= 65:
+    elif c['str'].endswith('ros.dylib') or c['str'].endswith('rosauthhook.dylib'):
         continue
-    elif 'rosauthhook' in c['str']:
+    elif c['str'] == '/usr/lib/libSystem.B.dylib' and c['idx'] >= 65:
         continue
     else:
         non_codesig.append(c)
@@ -180,10 +180,10 @@ print(f'Mach-O load commands reorganized: {new_ncmds} commands, LC_CODE_SIGNATUR
 subprocess.run(['install_name_tool', '-id', '@executable_path/Frameworks/aimbot_auto.dylib', dst_aimbot], check=True)
 subprocess.run(['codesign', '-f', '-s', '-', dst_aimbot], check=True)
 
+# Remove crashing ros.dylib from Frameworks
 ros_dylib = os.path.join(fw_dir, 'ros.dylib')
 if os.path.exists(ros_dylib):
-    subprocess.run(['install_name_tool', '-id', '@executable_path/Frameworks/ros.dylib', ros_dylib], check=True)
-    subprocess.run(['codesign', '-f', '-s', '-', ros_dylib], check=True)
+    os.remove(ros_dylib)
 
 # 4. Sign the entire app bundle (creates valid CodeResources and seals Info.plist hash into client)
 print('Codesigning full Payload/client.app bundle...')
@@ -197,29 +197,28 @@ if res.returncode != 0:
     raise RuntimeError('Bundle codesign verification failed!')
 "
 
-# Remove any old rosauthhook.dylib from both IPAs
-zip -d "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" "Payload/client.app/rosauthhook.dylib" 2>/dev/null || true
-zip -d "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" "Payload/client.app/rosauthhook.dylib" 2>/dev/null || true
+# Remove any old rosauthhook.dylib and ros.dylib from IPAs
+zip -d "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" "Payload/client.app/rosauthhook.dylib" "Payload/client.app/Frameworks/ros.dylib" 2>/dev/null || true
+zip -d "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" "Payload/client.app/rosauthhook.dylib" "Payload/client.app/Frameworks/ros.dylib" 2>/dev/null || true
 
-# Update both IPAs with clean client, Info.plist, aimbot_auto.dylib, ros.dylib, and _CodeSignature
-echo "Updating IPAs with verified bundle components..."
+# Update IPAs with clean client, Info.plist, aimbot_auto.dylib (local bridge), and _CodeSignature
+echo "Updating IPAs with verified local bridge bundle..."
 (cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" \
     Payload/client.app/client \
     Payload/client.app/Info.plist \
     Payload/client.app/Frameworks/aimbot_auto.dylib \
-    Payload/client.app/Frameworks/ros.dylib \
     Payload/client.app/_CodeSignature/CodeResources)
 
 (cd "$TMP_IPA_UPDATE" && zip -u "$ROOT_DIR/../Ros ikhozzzz v2.6.0_Fixed.ipa" \
     Payload/client.app/client \
     Payload/client.app/Info.plist \
     Payload/client.app/Frameworks/aimbot_auto.dylib \
-    Payload/client.app/Frameworks/ros.dylib \
     Payload/client.app/_CodeSignature/CodeResources)
 
+cp "$ROOT_DIR/../Ros ikhozzzz v2.4.0.ipa" "$ROOT_DIR/../Ros_Local_Play.ipa"
 rm -rf "$TMP_IPA_UPDATE"
 
 echo "==============================================="
-echo "   Build Complete! All packages & IPAs updated "
+echo "   Build Complete! Local Bridge IPAs Ready     "
 echo "==============================================="
 
