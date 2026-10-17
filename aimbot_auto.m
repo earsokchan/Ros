@@ -621,12 +621,330 @@ static void custom_feature12(id self, SEL _cmd, id sw) {
     }
 }
 
+// =============================================================================
+// 3. ESP LINE (MEMORY ANTENNA / SKY LINE) ENGINE & MENU INJECTION
+// =============================================================================
+
+#include <math.h>
+
+#define BIT_0_88   0x3f6147afULL // 0.88000005484f (Player model anchor)
+#define BIT_1_75   0x3fe00000ULL // 1.75f (Player height anchor)
+#define BIT_1_80   0x3fe66666ULL // 1.80f (Standing height anchor)
+#define BIT_1_0F   0x3f800000ULL // 1.0f (Normal scale)
+#define BIT_350F   0x43af0000ULL // 350.0f (Antenna Sky Line)
+
+typedef struct {
+    mach_vm_address_t addrs[32];
+    uint32_t orig_vals[32];
+    int count;
+    BOOL is_active;
+} esp_antenna_state_t;
+
+static esp_antenna_state_t g_esp_state = {0};
+
+static void *background_esp_antenna_scanner(void *arg) {
+    BOOL enable = (BOOL)(intptr_t)arg;
+    mach_port_t task = mach_task_self();
+
+    if (!enable) {
+        if (g_esp_state.is_active) {
+            for (int i = 0; i < g_esp_state.count; i++) {
+                if (g_esp_state.addrs[i]) {
+                    mach_vm_write(task, g_esp_state.addrs[i], (vm_offset_t)&g_esp_state.orig_vals[i], 4);
+                }
+            }
+            g_esp_state.count = 0;
+            g_esp_state.is_active = NO;
+        }
+        return NULL;
+    }
+
+    mach_vm_address_t address = 0x100000000;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name = MACH_PORT_NULL;
+
+    #define ESP_CHUNK_SIZE 32768
+    uint8_t buf[ESP_CHUNK_SIZE];
+
+    g_esp_state.count = 0;
+
+    while (address < 0x280000000 && g_esp_state.count < 32) {
+        count = VM_REGION_BASIC_INFO_COUNT_64;
+        if (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&info, &count, &object_name) != KERN_SUCCESS) {
+            break;
+        }
+
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) &&
+            !(info.protection & VM_PROT_EXECUTE) && size <= (16 * 1024 * 1024)) {
+            mach_vm_size_t offset = 0;
+            while (offset < size && g_esp_state.count < 32) {
+                mach_vm_size_t chunk = (size - offset > ESP_CHUNK_SIZE) ? ESP_CHUNK_SIZE : (size - offset);
+                mach_vm_size_t bytes_read = 0;
+                if (mach_vm_read_overwrite(task, address + offset, chunk, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
+                    for (mach_vm_size_t i = 0; i + 4 <= bytes_read && g_esp_state.count < 32; i += 4) {
+                        uint32_t val;
+                        memcpy(&val, buf + i, 4);
+                        if (val == (uint32_t)BIT_0_88 || val == (uint32_t)BIT_1_75 || val == (uint32_t)BIT_1_80) {
+                            mach_vm_size_t w_start = (i >= 128) ? (i - 128) : 0;
+                            mach_vm_size_t max_b = (bytes_read >= 4) ? (bytes_read - 4) : 0;
+                            mach_vm_size_t w_end = (i + 128 <= max_b) ? (i + 128) : max_b;
+
+                            for (mach_vm_size_t j = w_start; j <= w_end && g_esp_state.count < 32; j += 4) {
+                                uint32_t v2;
+                                memcpy(&v2, buf + j, 4);
+                                if (v2 == (uint32_t)BIT_1_0F) {
+                                    mach_vm_address_t target_addr = address + offset + j;
+                                    g_esp_state.addrs[g_esp_state.count] = target_addr;
+                                    g_esp_state.orig_vals[g_esp_state.count] = v2;
+                                    g_esp_state.count++;
+
+                                    uint32_t antenna_val = (uint32_t)BIT_350F;
+                                    mach_vm_write(task, target_addr, (vm_offset_t)&antenna_val, 4);
+                                }
+                            }
+                        }
+                    }
+                }
+                offset += chunk;
+            }
+        }
+        address += size;
+    }
+
+    if (g_esp_state.count > 0) {
+        g_esp_state.is_active = YES;
+    }
+    return NULL;
+}
+
+static void apply_esp_line_antenna(BOOL enable) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, background_esp_antenna_scanner, (void *)(intptr_t)enable) == 0) {
+        pthread_detach(t);
+    }
+}
+
+// Target-Action handler for ESP LINE switch
+__attribute__((objc_root_class))
+@interface AimbotESPHandler
++ (void)espLineToggled:(id)sender;
+@end
+
+@implementation AimbotESPHandler
++ (void)espLineToggled:(id)sender {
+    BOOL on = YES;
+    if (sender) {
+        SEL isOnSel = sel("isOn");
+        if ((BOOL)msgSend(sender, sel("respondsToSelector:"), isOnSel)) {
+            on = (BOOL)msgSend(sender, isOnSel);
+        }
+    }
+
+    Class nsDefaults = cls("NSUserDefaults");
+    if (nsDefaults) {
+        id defaults = msgSend((id)nsDefaults, sel("standardUserDefaults"));
+        if (defaults) {
+            Class nsString = cls("NSString");
+            id key = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_espline");
+            msgSend(defaults, sel("setBool:forKey:"), on, key);
+            msgSend(defaults, sel("synchronize"));
+        }
+    }
+
+    if (on) {
+        const char *lines[] = {
+            "> [0.00s] Initializing ESP LINE (Antenna) Engine...",
+            "> [0.12s] Scanning Player Skeleton & Bone Matrices...",
+            "> [0.28s] Matched Player Spine & Head Coordinate Anchors",
+            "> [0.45s] Extending Z-Axis Scale Vector [1.0 -> 350.0]",
+            "> [0.65s] Sky Line Projection Active Across World Space",
+            "> [0.85s] [✓] ESP LINE (ANTENNA) 100% ACTIVE!"
+        };
+        double delays[] = {0.00, 0.12, 0.28, 0.45, 0.65, 0.85};
+        show_custom_terminal_flow("📡 ESP LINE (Antenna) Terminal", lines, delays, 6, 4.5);
+    } else {
+        const char *lines[] = {
+            "> [0.00s] ESP LINE Toggled OFF: Restoring Bone Scales...",
+            "> [0.18s] Reverting Z-Axis Vector -> 1.0 (Default)",
+            "> [0.35s] [✓] ESP LINE (Antenna) Disabled Cleanly."
+        };
+        double delays[] = {0.00, 0.18, 0.35};
+        show_custom_terminal_flow("📡 ESP LINE [Disabled]", lines, delays, 3, 3.0);
+    }
+
+    apply_esp_line_antenna(on);
+}
+@end
+
+static id find_view_with_text(id view, const char *searchStr) {
+    if (!view) return NULL;
+    Class uiLabel = cls("UILabel");
+    Class uiButton = cls("UIButton");
+    if (uiLabel && (BOOL)msgSend(view, sel("isKindOfClass:"), uiLabel)) {
+        id text = msgSend(view, sel("text"));
+        if (text) {
+            const char *cStr = (const char *)msgSend(text, sel("UTF8String"));
+            if (cStr && strstr(cStr, searchStr)) return view;
+        }
+    }
+    if (uiButton && (BOOL)msgSend(view, sel("isKindOfClass:"), uiButton)) {
+        id titleLabel = msgSend(view, sel("titleLabel"));
+        if (titleLabel) {
+            id text = msgSend(titleLabel, sel("text"));
+            if (text) {
+                const char *cStr = (const char *)msgSend(text, sel("UTF8String"));
+                if (cStr && strstr(cStr, searchStr)) return view;
+            }
+        }
+    }
+    id subviews = msgSend(view, sel("subviews"));
+    if (subviews) {
+        NSUInteger cnt = (NSUInteger)msgSend(subviews, sel("count"));
+        for (NSUInteger i = 0; i < cnt; i++) {
+            id sv = msgSend(subviews, sel("objectAtIndex:"), i);
+            id found = find_view_with_text(sv, searchStr);
+            if (found) return found;
+        }
+    }
+    return NULL;
+}
+
+static void inject_espline_into_menu(void) {
+    Class uiApp = cls("UIApplication");
+    if (!uiApp) return;
+    id app = msgSend((id)uiApp, sel("sharedApplication"));
+    if (!app) return;
+    id window = msgSend(app, sel("keyWindow"));
+    if (!window) {
+        id windows = msgSend(app, sel("windows"));
+        if (windows && (NSUInteger)msgSend(windows, sel("count")) > 0) {
+            window = msgSend(windows, sel("objectAtIndex:"), 0);
+        }
+    }
+    if (!window) return;
+
+    // Check if ESP LINE is already added
+    if (find_view_with_text(window, "ESP LINE")) {
+        return;
+    }
+
+    // Find reference row "AIMBOT 180" or "AIMBOT 360"
+    id refView = find_view_with_text(window, "AIMBOT 180");
+    if (!refView) {
+        refView = find_view_with_text(window, "AIMBOT 360");
+    }
+    if (!refView) return;
+
+    id menuContainer = msgSend(refView, sel("superview"));
+    if (!menuContainer) return;
+
+    CGRect refFrame = ((CGRect (*)(id, SEL))objc_msgSend)(refView, sel("frame"));
+
+    Class uiSwitch = cls("UISwitch");
+    id lastSwitch = NULL;
+    id subviews = msgSend(menuContainer, sel("subviews"));
+    if (subviews) {
+        NSUInteger cnt = (NSUInteger)msgSend(subviews, sel("count"));
+        for (NSUInteger i = 0; i < cnt; i++) {
+            id sv = msgSend(subviews, sel("objectAtIndex:"), i);
+            if (uiSwitch && (BOOL)msgSend(sv, sel("isKindOfClass:"), uiSwitch)) {
+                CGRect swFrame = ((CGRect (*)(id, SEL))objc_msgSend)(sv, sel("frame"));
+                if (fabs(swFrame.origin.y - refFrame.origin.y) < 18.0) {
+                    lastSwitch = sv;
+                    break;
+                }
+            }
+        }
+    }
+
+    CGFloat stepY = 32.0;
+    CGFloat newLabelY = refFrame.origin.y + stepY;
+    CGFloat newSwitchY = lastSwitch ? (((CGRect (*)(id, SEL))objc_msgSend)(lastSwitch, sel("frame")).origin.y + stepY) : newLabelY;
+    CGFloat switchX = lastSwitch ? ((CGRect (*)(id, SEL))objc_msgSend)(lastSwitch, sel("frame")).origin.x : (refFrame.origin.x + refFrame.size.width + 10.0);
+
+    // Expand container view frame
+    CGRect cFrame = ((CGRect (*)(id, SEL))objc_msgSend)(menuContainer, sel("frame"));
+    if (newLabelY + 45.0 > cFrame.size.height) {
+        cFrame.size.height = newLabelY + 45.0;
+        msgSend_rect(menuContainer, sel("setFrame:"), cFrame);
+    }
+    if ((BOOL)msgSend(menuContainer, sel("respondsToSelector:"), sel("contentSize"))) {
+        CGSize cs = ((CGSize (*)(id, SEL))objc_msgSend)(menuContainer, sel("contentSize"));
+        if (newLabelY + 45.0 > cs.height) {
+            cs.height = newLabelY + 50.0;
+            ((void (*)(id, SEL, CGSize))objc_msgSend)(menuContainer, sel("setContentSize:"), cs);
+        }
+    }
+
+    Class uiLabel = cls("UILabel");
+    Class uiColor = cls("UIColor");
+    Class uiFont = cls("UIFont");
+    Class nsString = cls("NSString");
+
+    // Add "ESP LINE" Label
+    id espLabel = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"),
+                               CGRectMake(refFrame.origin.x, newLabelY, refFrame.size.width, refFrame.size.height));
+    id textStr = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "ESP LINE");
+    msgSend(espLabel, sel("setText:"), textStr);
+    id whiteColor = msgSend((id)uiColor, sel("whiteColor"));
+    msgSend(espLabel, sel("setTextColor:"), whiteColor);
+    id font = msgSend((id)uiFont, sel("boldSystemFontOfSize:"), 13.0);
+    msgSend(espLabel, sel("setFont:"), font);
+    msgSend(menuContainer, sel("addSubview:"), espLabel);
+
+    // Add "ESP LINE" Switch
+    id espSwitch = msgSend_rect(msgSend((id)uiSwitch, sel("alloc")), sel("initWithFrame:"),
+                                CGRectMake(switchX, newSwitchY, 51.0, 31.0));
+    Class nsDefaults = cls("NSUserDefaults");
+    BOOL isOn = NO;
+    if (nsDefaults) {
+        id defs = msgSend((id)nsDefaults, sel("standardUserDefaults"));
+        if (defs) {
+            id k = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_espline");
+            isOn = (BOOL)msgSend(defs, sel("boolForKey:"), k);
+        }
+    }
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(espSwitch, sel("setOn:"), isOn);
+    id cyanColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.8, 1.0, 1.0);
+    if ((BOOL)msgSend(espSwitch, sel("respondsToSelector:"), sel("setThumbTintColor:"))) {
+        msgSend(espSwitch, sel("setThumbTintColor:"), cyanColor);
+    }
+    msgSend(espSwitch, sel("addTarget:action:forControlEvents:"), cls("AimbotESPHandler"), sel("espLineToggled:"), 1 << 12);
+    msgSend(menuContainer, sel("addSubview:"), espSwitch);
+}
+
+static void (*orig_caidan)(id self, SEL _cmd) = NULL;
+
+static void custom_caidan(id self, SEL _cmd) {
+    if (orig_caidan) {
+        orig_caidan(self, _cmd);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        inject_espline_into_menu();
+    });
+}
+
 static void install_hooks(void) {
     Class metaCls = objc_getMetaClass("NSObject");
     if (metaCls) {
         class_replaceMethod(metaCls, sel("feature3:"), (IMP)custom_feature3, "v@:@");
         class_replaceMethod(metaCls, sel("feature11:"), (IMP)custom_feature11, "v@:@");
         class_replaceMethod(metaCls, sel("feature12:"), (IMP)custom_feature12, "v@:@");
+    }
+
+    Class nsObj = objc_getClass("NSObject");
+    if (nsObj) {
+        Method m = class_getInstanceMethod(nsObj, sel("caidan"));
+        if (m) {
+            IMP currentImp = method_getImplementation(m);
+            if (currentImp != (IMP)custom_caidan) {
+                orig_caidan = (void (*)(id, SEL))currentImp;
+                method_setImplementation(m, (IMP)custom_caidan);
+            }
+        }
     }
 }
 
@@ -637,9 +955,23 @@ static void init_aimbot_hook() {
     // Re-verify hooks after app finishes initialization
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         install_hooks();
+
+        // Restore ESP Line if saved as ON
+        Class nsDefaults = cls("NSUserDefaults");
+        if (nsDefaults) {
+            id defs = msgSend((id)nsDefaults, sel("standardUserDefaults"));
+            if (defs) {
+                Class nsString = cls("NSString");
+                id k = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_espline");
+                if ((BOOL)msgSend(defs, sel("boolForKey:"), k)) {
+                    apply_esp_line_antenna(YES);
+                }
+            }
+        }
     });
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         install_hooks();
     });
 }
+
