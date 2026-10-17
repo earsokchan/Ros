@@ -959,56 +959,6 @@ __attribute__((objc_root_class))
 }
 @end
 
-// =============================================================================
-// OFFLINE LOGIN BYPASS & BOT MATCH HANDLER
-// =============================================================================
-
-static void apply_offline_login_ticket(void) {
-    void (*p_ros_apply_ticket)(const char *) = (void (*)(const char *))dlsym(RTLD_DEFAULT, "ros_apply_ticket");
-    if (!p_ros_apply_ticket) {
-        p_ros_apply_ticket = (void (*)(const char *))dlsym(RTLD_DEFAULT, "_ros_apply_ticket");
-    }
-    if (p_ros_apply_ticket) {
-        p_ros_apply_ticket("vibol_player:offline_token_88888888");
-        printf("[aimbot_auto] Offline ticket applied successfully! Session key stamped.\n");
-    }
-
-    // Also notify NtSdkMgr directly if available
-    Class ntMgr = cls("NtSdkMgr");
-    if (ntMgr) {
-        id inst = msgSend((id)ntMgr, sel("getInst"));
-        if (inst) {
-            Class nsString = cls("NSString");
-            id kUser = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "UIN");
-            id vUser = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "vibol_tester_8888");
-            msgSend(inst, sel("setPropStr:as:"), kUser, vUser);
-
-            id kToken = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "SESSION");
-            id vToken = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "offline_session_ok");
-            msgSend(inst, sel("setPropStr:as:"), kToken, vToken);
-        }
-    }
-
-    // Post NT_NOTIFICATION_LOGIN {login_state=0} to NSNotificationCenter
-    Class nsNotifCenter = cls("NSNotificationCenter");
-    if (nsNotifCenter) {
-        id center = msgSend((id)nsNotifCenter, sel("defaultCenter"));
-        if (center) {
-            Class nsString = cls("NSString");
-            id notifName = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "NT_NOTIFICATION_LOGIN");
-            Class nsDict = cls("NSDictionary");
-            id kState = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "login_state");
-            Class nsNumber = cls("NSNumber");
-            id vState = msgSend((id)nsNumber, sel("numberWithInt:"), 0);
-            if (notifName && kState && vState && nsDict) {
-                id userInfo = msgSend((id)nsDict, sel("dictionaryWithObject:forKey:"), vState, kState);
-                msgSend(center, sel("postNotificationName:object:userInfo:"), notifName, NULL, userInfo);
-                printf("[aimbot_auto] Posted NT_NOTIFICATION_LOGIN {login_state=0} to NSNotificationCenter!\n");
-            }
-        }
-    }
-}
-
 // Global count overrides for bot testing mode
 static int g_offline_bot_mode = 0;
 
@@ -1041,8 +991,6 @@ __attribute__((objc_root_class))
     g_offline_bot_mode = on ? 1 : 0;
 
     if (on) {
-        apply_offline_login_ticket();
-
         const char *lines[] = {
             "> [0.00s] Offline Local Mode: ACTIVE (No Server Needed)",
             "> [0.15s] RosLegacy Server Verification: BYPASS [OK]",
@@ -1496,15 +1444,9 @@ static void install_hooks(void) {
 __attribute__((constructor))
 static void init_aimbot_hook() {
     install_hooks();
-    apply_offline_login_ticket();
 
-    // Re-apply offline ticket and auto-launch counter
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        apply_offline_login_ticket();
-    });
-
+    // Auto-launch real-time counter and restore saved states
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        apply_offline_login_ticket();
         install_hooks();
         init_realtime_player_bot_counter();
 
@@ -1533,8 +1475,7 @@ static void init_aimbot_hook() {
         }
     });
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        apply_offline_login_ticket();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         install_hooks();
         init_realtime_player_bot_counter();
     });
