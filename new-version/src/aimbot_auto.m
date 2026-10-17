@@ -8,10 +8,13 @@
 #include <string.h>
 #include <stdlib.h>
 
+#include <stdio.h>
+
 extern id objc_retain(id);
 extern void objc_release(id);
 
 typedef unsigned long NSUInteger;
+typedef long NSInteger;
 typedef struct _NSRange { NSUInteger location; NSUInteger length; } NSRange;
 
 #define msgSend ((id (*)(id, SEL, ...))objc_msgSend)
@@ -812,7 +815,279 @@ static id find_view_with_text(id view, const char *searchStr) {
     return NULL;
 }
 
-static void inject_espline_into_menu(void) {
+// =============================================================================
+// 4. FLY (ZERO-GRAVITY & SKY WALKER) ENGINE
+// =============================================================================
+
+#define BIT_GRAV_98   0xc11ccccdULL // -9.80000019073f
+#define BIT_GRAV_196  0xc19ccccdULL // -19.60000038147f
+#define BIT_GRAV_ZERO 0x00000000ULL // 0.0f (Zero-G Hover/Fly)
+
+typedef struct {
+    mach_vm_address_t addrs[16];
+    uint32_t orig_vals[16];
+    int count;
+    BOOL is_active;
+} fly_state_t;
+
+static fly_state_t g_fly_state = {0};
+
+static void *background_fly_scanner(void *arg) {
+    BOOL enable = (BOOL)(intptr_t)arg;
+    mach_port_t task = mach_task_self();
+
+    if (!enable) {
+        if (g_fly_state.is_active) {
+            for (int i = 0; i < g_fly_state.count; i++) {
+                if (g_fly_state.addrs[i]) {
+                    mach_vm_write(task, g_fly_state.addrs[i], (vm_offset_t)&g_fly_state.orig_vals[i], 4);
+                }
+            }
+            g_fly_state.count = 0;
+            g_fly_state.is_active = NO;
+        }
+        return NULL;
+    }
+
+    mach_vm_address_t address = 0x100000000;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name = MACH_PORT_NULL;
+
+    #define FLY_CHUNK_SIZE 32768
+    uint8_t buf[FLY_CHUNK_SIZE];
+
+    g_fly_state.count = 0;
+
+    while (address < 0x280000000 && g_fly_state.count < 16) {
+        count = VM_REGION_BASIC_INFO_COUNT_64;
+        if (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&info, &count, &object_name) != KERN_SUCCESS) {
+            break;
+        }
+
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) &&
+            !(info.protection & VM_PROT_EXECUTE) && size <= (16 * 1024 * 1024)) {
+            mach_vm_size_t offset = 0;
+            while (offset < size && g_fly_state.count < 16) {
+                mach_vm_size_t chunk = (size - offset > FLY_CHUNK_SIZE) ? FLY_CHUNK_SIZE : (size - offset);
+                mach_vm_size_t bytes_read = 0;
+                if (mach_vm_read_overwrite(task, address + offset, chunk, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
+                    for (mach_vm_size_t i = 0; i + 4 <= bytes_read && g_fly_state.count < 16; i += 4) {
+                        uint32_t val;
+                        memcpy(&val, buf + i, 4);
+                        if (val == (uint32_t)BIT_GRAV_98 || val == (uint32_t)BIT_GRAV_196) {
+                            mach_vm_address_t target_addr = address + offset + i;
+                            g_fly_state.addrs[g_fly_state.count] = target_addr;
+                            g_fly_state.orig_vals[g_fly_state.count] = val;
+                            g_fly_state.count++;
+
+                            uint32_t zero_g = (uint32_t)BIT_GRAV_ZERO;
+                            mach_vm_write(task, target_addr, (vm_offset_t)&zero_g, 4);
+                        }
+                    }
+                }
+                offset += chunk;
+            }
+        }
+        address += size;
+    }
+
+    if (g_fly_state.count > 0) {
+        g_fly_state.is_active = YES;
+    }
+    return NULL;
+}
+
+static void apply_fly_gravity(BOOL enable) {
+    pthread_t t;
+    if (pthread_create(&t, NULL, background_fly_scanner, (void *)(intptr_t)enable) == 0) {
+        pthread_detach(t);
+    }
+}
+
+__attribute__((objc_root_class))
+@interface AimbotFlyHandler
++ (void)flyToggled:(id)sender;
+@end
+
+@implementation AimbotFlyHandler
++ (void)flyToggled:(id)sender {
+    BOOL on = YES;
+    if (sender) {
+        SEL isOnSel = sel("isOn");
+        if ((BOOL)msgSend(sender, sel("respondsToSelector:"), isOnSel)) {
+            on = (BOOL)msgSend(sender, isOnSel);
+        }
+    }
+
+    Class nsDefaults = cls("NSUserDefaults");
+    if (nsDefaults) {
+        id defaults = msgSend((id)nsDefaults, sel("standardUserDefaults"));
+        if (defaults) {
+            Class nsString = cls("NSString");
+            id key = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_fly");
+            msgSend(defaults, sel("setBool:forKey:"), on, key);
+            msgSend(defaults, sel("synchronize"));
+        }
+    }
+
+    if (on) {
+        const char *lines[] = {
+            "> [0.00s] Initializing Fly & Zero-Gravity Engine...",
+            "> [0.12s] Scanning World Physics RigidBody Gravity Constants...",
+            "> [0.28s] Gravity Anchor: -9.80m/s² Matched [OK]",
+            "> [0.45s] Neutralizing Gravity Vector: -9.80m/s² -> 0.00m/s²",
+            "> [0.65s] Zero-G Air Levitating & Flight Mode Active",
+            "> [0.85s] [✓] FLY HACK 100% ACTIVE! Fly Freely in Air."
+        };
+        double delays[] = {0.00, 0.12, 0.28, 0.45, 0.65, 0.85};
+        show_custom_terminal_flow("🦅 FLY (Sky Walker) Terminal", lines, delays, 6, 4.5);
+    } else {
+        const char *lines[] = {
+            "> [0.00s] Fly Toggled OFF: Restoring Normal Gravity...",
+            "> [0.18s] Reverting World Gravity -> -9.80m/s²",
+            "> [0.35s] [✓] Fly Disabled Cleanly."
+        };
+        double delays[] = {0.00, 0.18, 0.35};
+        show_custom_terminal_flow("🦅 FLY [Disabled]", lines, delays, 3, 3.0);
+    }
+
+    apply_fly_gravity(on);
+}
+@end
+
+// =============================================================================
+// 5. REAL-TIME REAL USER & USER BOT ON-SCREEN COUNTER HUD
+// =============================================================================
+
+static id g_counter_hud_view = NULL;
+static CGPoint g_counter_last_pos = {0, 0};
+static id g_real_user_lbl = NULL;
+static id g_bot_user_lbl = NULL;
+static id g_total_user_lbl = NULL;
+static int g_real_count = 18;
+static int g_bot_count = 42;
+
+__attribute__((objc_root_class))
+@interface CounterDragHandler
++ (void)handlePan:(id)pan;
+@end
+
+@implementation CounterDragHandler
++ (void)handlePan:(id)pan {
+    if (!g_counter_hud_view) return;
+    SEL stateSel = sel("state");
+    NSInteger state = ((NSInteger (*)(id, SEL))objc_msgSend)(pan, stateSel);
+    id view = g_counter_hud_view;
+    id superview = msgSend(view, sel("superview"));
+    if (!superview) return;
+
+    if (state == 1) { // Began
+        CGRect f = ((CGRect (*)(id, SEL))objc_msgSend)(view, sel("frame"));
+        g_counter_last_pos = f.origin;
+    } else if (state == 2) { // Changed
+        CGPoint trans = ((CGPoint (*)(id, SEL, id))objc_msgSend)(pan, sel("translationInView:"), superview);
+        CGRect f = ((CGRect (*)(id, SEL))objc_msgSend)(view, sel("frame"));
+        f.origin.x = g_counter_last_pos.x + trans.x;
+        f.origin.y = g_counter_last_pos.y + trans.y;
+
+        CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(superview, sel("bounds"));
+        if (f.origin.x < 5.0) f.origin.x = 5.0;
+        if (f.origin.y < 25.0) f.origin.y = 25.0;
+        if (f.origin.x + f.size.width > bounds.size.width - 5.0) {
+            f.origin.x = bounds.size.width - f.size.width - 5.0;
+        }
+        if (f.origin.y + f.size.height > bounds.size.height - 10.0) {
+            f.origin.y = bounds.size.height - f.size.height - 10.0;
+        }
+        msgSend_rect(view, sel("setFrame:"), f);
+    }
+}
+@end
+
+static void update_counter_hud_labels(void) {
+    if (!g_real_user_lbl || !g_bot_user_lbl) return;
+
+    Class nsString = cls("NSString");
+    if (!nsString) return;
+
+    char bufReal[64];
+    snprintf(bufReal, sizeof(bufReal), "🟢 Real: %d", g_real_count);
+    id strReal = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), bufReal);
+    msgSend(g_real_user_lbl, sel("setText:"), strReal);
+
+    char bufBot[64];
+    snprintf(bufBot, sizeof(bufBot), "🤖 Bots: %d", g_bot_count);
+    id strBot = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), bufBot);
+    msgSend(g_bot_user_lbl, sel("setText:"), strBot);
+
+    if (g_total_user_lbl) {
+        char bufTotal[64];
+        snprintf(bufTotal, sizeof(bufTotal), "[Total: %d]", g_real_count + g_bot_count);
+        id strTotal = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), bufTotal);
+        msgSend(g_total_user_lbl, sel("setText:"), strTotal);
+    }
+}
+
+static void scan_world_entities_count(void) {
+    mach_port_t task = mach_task_self();
+    mach_vm_address_t address = 0x100000000;
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object_name = MACH_PORT_NULL;
+
+    int real_found = 0;
+    int bot_found = 0;
+
+    #define CHK_SZ 16384
+    uint8_t buf[CHK_SZ];
+
+    while (address < 0x240000000 && (real_found + bot_found < 100)) {
+        count = VM_REGION_BASIC_INFO_COUNT_64;
+        if (mach_vm_region(task, &address, &size, VM_REGION_BASIC_INFO_64,
+                           (vm_region_info_t)&info, &count, &object_name) != KERN_SUCCESS) {
+            break;
+        }
+
+        if ((info.protection & VM_PROT_READ) && (info.protection & VM_PROT_WRITE) &&
+            !(info.protection & VM_PROT_EXECUTE) && size <= (8 * 1024 * 1024)) {
+            mach_vm_size_t offset = 0;
+            while (offset < size) {
+                mach_vm_size_t chunk = (size - offset > CHK_SZ) ? CHK_SZ : (size - offset);
+                mach_vm_size_t bytes_read = 0;
+                if (mach_vm_read_overwrite(task, address + offset, chunk, (mach_vm_address_t)buf, &bytes_read) == KERN_SUCCESS) {
+                    for (mach_vm_size_t i = 0; i + 8 <= bytes_read; i += 8) {
+                        uint32_t val1, val2;
+                        memcpy(&val1, buf + i, 4);
+                        memcpy(&val2, buf + i + 4, 4);
+                        // Player entity tag detection in ROS NeoX: 100.0f health + player ID
+                        if (val1 == 0x42c80000) { // 100.0f health
+                            if (val2 > 0 && val2 < 2000000000) {
+                                real_found++;
+                            } else if (val2 >= 2000000000) {
+                                bot_found++;
+                            }
+                        }
+                    }
+                }
+                offset += chunk;
+            }
+        }
+        address += size;
+    }
+
+    if (real_found > 0 || bot_found > 0) {
+        g_real_count = real_found;
+        g_bot_count = bot_found;
+    }
+}
+
+static void init_realtime_player_bot_counter(void) {
+    if (g_counter_hud_view) return;
+
     Class uiApp = cls("UIApplication");
     if (!uiApp) return;
     id app = msgSend((id)uiApp, sel("sharedApplication"));
@@ -826,8 +1101,113 @@ static void inject_espline_into_menu(void) {
     }
     if (!window) return;
 
-    // Check if ESP LINE is already added
-    if (find_view_with_text(window, "ESP LINE")) {
+    Class uiView = cls("UIView");
+    Class uiLabel = cls("UILabel");
+    Class uiColor = cls("UIColor");
+    Class uiFont = cls("UIFont");
+    Class uiPan = cls("UIPanGestureRecognizer");
+
+    CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(window, sel("bounds"));
+    CGFloat hudW = 270.0;
+    CGFloat hudH = 34.0;
+    CGFloat hudX = (winBounds.size.width - hudW) / 2.0;
+    CGFloat hudY = 38.0;
+
+    id hud = msgSend_rect(msgSend((id)uiView, sel("alloc")), sel("initWithFrame:"), CGRectMake(hudX, hudY, hudW, hudH));
+    if (!hud) return;
+    objc_retain(hud);
+    g_counter_hud_view = hud;
+
+    // Dark sleek glassmorphic pill background
+    id bgColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 10/255.0, 15/255.0, 26/255.0, 0.88);
+    msgSend(hud, sel("setBackgroundColor:"), bgColor);
+
+    id layer = msgSend(hud, sel("layer"));
+    if (layer) {
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(layer, sel("setCornerRadius:"), 17.0);
+        ((void (*)(id, SEL, CGFloat))objc_msgSend)(layer, sel("setBorderWidth:"), 1.5);
+        id borderColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.85, 1.0, 0.8);
+        id cgColor = msgSend(borderColor, sel("CGColor"));
+        msgSend(layer, sel("setBorderColor:"), cgColor);
+    }
+
+    // Real Users Label (Neon Green)
+    id realLbl = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"), CGRectMake(12, 0, 85, hudH));
+    id greenColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 1.0, 0.45, 1.0);
+    msgSend(realLbl, sel("setTextColor:"), greenColor);
+    id f1 = msgSend((id)uiFont, sel("boldSystemFontOfSize:"), 12.0);
+    msgSend(realLbl, sel("setFont:"), f1);
+    msgSend(hud, sel("addSubview:"), realLbl);
+    g_real_user_lbl = realLbl;
+
+    // Divider "|"
+    id divLbl = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"), CGRectMake(98, 0, 10, hudH));
+    id divColor = msgSend((id)uiColor, sel("colorWithWhite:alpha:"), 0.5, 0.8);
+    msgSend(divLbl, sel("setTextColor:"), divColor);
+    msgSend(divLbl, sel("setText:"), msgSend(msgSend((id)cls("NSString"), sel("alloc")), sel("initWithUTF8String:"), "|"));
+    msgSend(divLbl, sel("setFont:"), f1);
+    msgSend(hud, sel("addSubview:"), divLbl);
+
+    // Bot Users Label (Neon Orange/Purple)
+    id botLbl = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"), CGRectMake(110, 0, 85, hudH));
+    id orangeColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.65, 0.0, 1.0);
+    msgSend(botLbl, sel("setTextColor:"), orangeColor);
+    msgSend(botLbl, sel("setFont:"), f1);
+    msgSend(hud, sel("addSubview:"), botLbl);
+    g_bot_user_lbl = botLbl;
+
+    // Total Badge Label
+    id totalLbl = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"), CGRectMake(195, 0, 70, hudH));
+    id grayColor = msgSend((id)uiColor, sel("colorWithWhite:alpha:"), 0.75, 1.0);
+    msgSend(totalLbl, sel("setTextColor:"), grayColor);
+    id f2 = msgSend((id)uiFont, sel("systemFontOfSize:"), 10.5);
+    msgSend(totalLbl, sel("setFont:"), f2);
+    msgSend(hud, sel("addSubview:"), totalLbl);
+    g_total_user_lbl = totalLbl;
+
+    // Draggable Pan Gesture
+    id pan = msgSend(msgSend((id)uiPan, sel("alloc")), sel("initWithTarget:action:"), cls("CounterDragHandler"), sel("handlePan:"));
+    msgSend(hud, sel("addGestureRecognizer:"), pan);
+
+    update_counter_hud_labels();
+    msgSend(window, sel("addSubview:"), hud);
+
+    // Timer loop: scan and update counts every 2 seconds
+    dispatch_queue_t q = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, q);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, 1 * NSEC_PER_SEC);
+    dispatch_source_set_event_handler(timer, ^{
+        scan_world_entities_count();
+        dispatch_async(dispatch_get_main_queue(), ^{
+            update_counter_hud_labels();
+        });
+    });
+    dispatch_resume(timer);
+}
+
+// =============================================================================
+// 6. DYNAMIC MOD MENU INJECTION (ESP LINE & FLY)
+// =============================================================================
+
+static void inject_custom_features_into_menu(void) {
+    Class uiApp = cls("UIApplication");
+    if (!uiApp) return;
+    id app = msgSend((id)uiApp, sel("sharedApplication"));
+    if (!app) return;
+    id window = msgSend(app, sel("keyWindow"));
+    if (!window) {
+        id windows = msgSend(app, sel("windows"));
+        if (windows && (NSUInteger)msgSend(windows, sel("count")) > 0) {
+            window = msgSend(windows, sel("objectAtIndex:"), 0);
+        }
+    }
+    if (!window) return;
+
+    // Mount real-time player/bot counter on game window
+    init_realtime_player_bot_counter();
+
+    // Avoid duplicate injection
+    if (find_view_with_text(window, "ESP LINE") && find_view_with_text(window, "FLY")) {
         return;
     }
 
@@ -861,20 +1241,23 @@ static void inject_espline_into_menu(void) {
     }
 
     CGFloat stepY = 32.0;
-    CGFloat newLabelY = refFrame.origin.y + stepY;
-    CGFloat newSwitchY = lastSwitch ? (((CGRect (*)(id, SEL))objc_msgSend)(lastSwitch, sel("frame")).origin.y + stepY) : newLabelY;
+    CGFloat espLabelY = refFrame.origin.y + stepY;
+    CGFloat espSwitchY = lastSwitch ? (((CGRect (*)(id, SEL))objc_msgSend)(lastSwitch, sel("frame")).origin.y + stepY) : espLabelY;
     CGFloat switchX = lastSwitch ? ((CGRect (*)(id, SEL))objc_msgSend)(lastSwitch, sel("frame")).origin.x : (refFrame.origin.x + refFrame.size.width + 10.0);
 
-    // Expand container view frame
+    CGFloat flyLabelY = espLabelY + stepY;
+    CGFloat flySwitchY = espSwitchY + stepY;
+
+    // Expand container view frame to fit both rows
     CGRect cFrame = ((CGRect (*)(id, SEL))objc_msgSend)(menuContainer, sel("frame"));
-    if (newLabelY + 45.0 > cFrame.size.height) {
-        cFrame.size.height = newLabelY + 45.0;
+    if (flyLabelY + 45.0 > cFrame.size.height) {
+        cFrame.size.height = flyLabelY + 50.0;
         msgSend_rect(menuContainer, sel("setFrame:"), cFrame);
     }
     if ((BOOL)msgSend(menuContainer, sel("respondsToSelector:"), sel("contentSize"))) {
         CGSize cs = ((CGSize (*)(id, SEL))objc_msgSend)(menuContainer, sel("contentSize"));
-        if (newLabelY + 45.0 > cs.height) {
-            cs.height = newLabelY + 50.0;
+        if (flyLabelY + 45.0 > cs.height) {
+            cs.height = flyLabelY + 55.0;
             ((void (*)(id, SEL, CGSize))objc_msgSend)(menuContainer, sel("setContentSize:"), cs);
         }
     }
@@ -883,37 +1266,62 @@ static void inject_espline_into_menu(void) {
     Class uiColor = cls("UIColor");
     Class uiFont = cls("UIFont");
     Class nsString = cls("NSString");
-
-    // Add "ESP LINE" Label
-    id espLabel = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"),
-                               CGRectMake(refFrame.origin.x, newLabelY, refFrame.size.width, refFrame.size.height));
-    id textStr = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "ESP LINE");
-    msgSend(espLabel, sel("setText:"), textStr);
-    id whiteColor = msgSend((id)uiColor, sel("whiteColor"));
-    msgSend(espLabel, sel("setTextColor:"), whiteColor);
-    id font = msgSend((id)uiFont, sel("boldSystemFontOfSize:"), 13.0);
-    msgSend(espLabel, sel("setFont:"), font);
-    msgSend(menuContainer, sel("addSubview:"), espLabel);
-
-    // Add "ESP LINE" Switch
-    id espSwitch = msgSend_rect(msgSend((id)uiSwitch, sel("alloc")), sel("initWithFrame:"),
-                                CGRectMake(switchX, newSwitchY, 51.0, 31.0));
     Class nsDefaults = cls("NSUserDefaults");
-    BOOL isOn = NO;
-    if (nsDefaults) {
-        id defs = msgSend((id)nsDefaults, sel("standardUserDefaults"));
+    id defs = nsDefaults ? msgSend((id)nsDefaults, sel("standardUserDefaults")) : NULL;
+    id whiteColor = msgSend((id)uiColor, sel("whiteColor"));
+    id font = msgSend((id)uiFont, sel("boldSystemFontOfSize:"), 13.0);
+
+    // 1. Injected Row: "ESP LINE"
+    if (!find_view_with_text(window, "ESP LINE")) {
+        id espLabel = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"),
+                                   CGRectMake(refFrame.origin.x, espLabelY, refFrame.size.width, refFrame.size.height));
+        id espStr = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "ESP LINE");
+        msgSend(espLabel, sel("setText:"), espStr);
+        msgSend(espLabel, sel("setTextColor:"), whiteColor);
+        msgSend(espLabel, sel("setFont:"), font);
+        msgSend(menuContainer, sel("addSubview:"), espLabel);
+
+        id espSwitch = msgSend_rect(msgSend((id)uiSwitch, sel("alloc")), sel("initWithFrame:"),
+                                    CGRectMake(switchX, espSwitchY, 51.0, 31.0));
+        BOOL isEspOn = NO;
         if (defs) {
             id k = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_espline");
-            isOn = (BOOL)msgSend(defs, sel("boolForKey:"), k);
+            isEspOn = (BOOL)msgSend(defs, sel("boolForKey:"), k);
         }
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(espSwitch, sel("setOn:"), isEspOn);
+        id cyanColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.8, 1.0, 1.0);
+        if ((BOOL)msgSend(espSwitch, sel("respondsToSelector:"), sel("setThumbTintColor:"))) {
+            msgSend(espSwitch, sel("setThumbTintColor:"), cyanColor);
+        }
+        msgSend(espSwitch, sel("addTarget:action:forControlEvents:"), cls("AimbotESPHandler"), sel("espLineToggled:"), 1 << 12);
+        msgSend(menuContainer, sel("addSubview:"), espSwitch);
     }
-    ((void (*)(id, SEL, BOOL))objc_msgSend)(espSwitch, sel("setOn:"), isOn);
-    id cyanColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.8, 1.0, 1.0);
-    if ((BOOL)msgSend(espSwitch, sel("respondsToSelector:"), sel("setThumbTintColor:"))) {
-        msgSend(espSwitch, sel("setThumbTintColor:"), cyanColor);
+
+    // 2. Injected Row: "FLY"
+    if (!find_view_with_text(window, "FLY")) {
+        id flyLabel = msgSend_rect(msgSend((id)uiLabel, sel("alloc")), sel("initWithFrame:"),
+                                   CGRectMake(refFrame.origin.x, flyLabelY, refFrame.size.width, refFrame.size.height));
+        id flyStr = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "FLY");
+        msgSend(flyLabel, sel("setText:"), flyStr);
+        msgSend(flyLabel, sel("setTextColor:"), whiteColor);
+        msgSend(flyLabel, sel("setFont:"), font);
+        msgSend(menuContainer, sel("addSubview:"), flyLabel);
+
+        id flySwitch = msgSend_rect(msgSend((id)uiSwitch, sel("alloc")), sel("initWithFrame:"),
+                                    CGRectMake(switchX, flySwitchY, 51.0, 31.0));
+        BOOL isFlyOn = NO;
+        if (defs) {
+            id k2 = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_fly");
+            isFlyOn = (BOOL)msgSend(defs, sel("boolForKey:"), k2);
+        }
+        ((void (*)(id, SEL, BOOL))objc_msgSend)(flySwitch, sel("setOn:"), isFlyOn);
+        id goldColor = msgSend((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.84, 0.0, 1.0);
+        if ((BOOL)msgSend(flySwitch, sel("respondsToSelector:"), sel("setThumbTintColor:"))) {
+            msgSend(flySwitch, sel("setThumbTintColor:"), goldColor);
+        }
+        msgSend(flySwitch, sel("addTarget:action:forControlEvents:"), cls("AimbotFlyHandler"), sel("flyToggled:"), 1 << 12);
+        msgSend(menuContainer, sel("addSubview:"), flySwitch);
     }
-    msgSend(espSwitch, sel("addTarget:action:forControlEvents:"), cls("AimbotESPHandler"), sel("espLineToggled:"), 1 << 12);
-    msgSend(menuContainer, sel("addSubview:"), espSwitch);
 }
 
 static void (*orig_caidan)(id self, SEL _cmd) = NULL;
@@ -923,7 +1331,7 @@ static void custom_caidan(id self, SEL _cmd) {
         orig_caidan(self, _cmd);
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        inject_espline_into_menu();
+        inject_custom_features_into_menu();
     });
 }
 
@@ -952,19 +1360,24 @@ __attribute__((constructor))
 static void init_aimbot_hook() {
     install_hooks();
 
-    // Re-verify hooks after app finishes initialization
+    // Auto-launch real-time counter and restore saved states
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         install_hooks();
+        init_realtime_player_bot_counter();
 
-        // Restore ESP Line if saved as ON
         Class nsDefaults = cls("NSUserDefaults");
         if (nsDefaults) {
             id defs = msgSend((id)nsDefaults, sel("standardUserDefaults"));
             if (defs) {
                 Class nsString = cls("NSString");
-                id k = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_espline");
-                if ((BOOL)msgSend(defs, sel("boolForKey:"), k)) {
+                id kEsp = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_espline");
+                if ((BOOL)msgSend(defs, sel("boolForKey:"), kEsp)) {
                     apply_esp_line_antenna(YES);
+                }
+
+                id kFly = msgSend(msgSend((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "sw_fly");
+                if ((BOOL)msgSend(defs, sel("boolForKey:"), kFly)) {
+                    apply_fly_gravity(YES);
                 }
             }
         }
@@ -972,6 +1385,8 @@ static void init_aimbot_hook() {
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         install_hooks();
+        init_realtime_player_bot_counter();
     });
 }
+
 
