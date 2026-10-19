@@ -7,6 +7,8 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <mach-o/dyld.h>
+#include <libkern/OSAtomic.h>
+#include <time.h>
 
 #include "embedded_scripts.h"
 #import "embedded_header_png.h"
@@ -622,52 +624,56 @@ static void closeMenu_imp(id self, SEL _cmd, id sender) {
     ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 1);
 }
 
-// Dynamic switch sender helper for ros.dylib memory features
-static Class g_swCls = NULL;
-static BOOL g_currentSwState = NO;
+// VIP Memory feature synchronization
+static volatile int32_t g_vipScanActive = 0;
 
-static BOOL swIsOn_imp(id self, SEL _cmd) {
-    return g_currentSwState;
+// Native UISwitch sender helper for ros.dylib memory features
+static BOOL swIsOn_fallback(id self, SEL _cmd) {
+    return YES;
 }
 
 static id getSwitchSender(BOOL state) {
-    if (!g_swCls) {
-        Class superCls = cls("NSObject");
-        if (superCls) {
-            g_swCls = objc_allocateClassPair(superCls, "ROSTweakSwitch", 0);
-            if (g_swCls) {
-                class_addMethod(g_swCls, sel("isOn"), (IMP)swIsOn_imp, "B@:");
-                objc_registerClassPair(g_swCls);
-            }
+    Class swCls = cls("UISwitch");
+    if (swCls) {
+        id inst = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)swCls, sel("alloc")), sel("init"));
+        if (inst) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(inst, sel("setOn:"), state);
+            return inst;
         }
     }
-    g_currentSwState = state;
-    if (g_swCls) {
-        id inst = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)g_swCls, sel("alloc")), sel("init"));
-        if (inst) return inst;
-    }
-    return g_uiMgr;
+    return NULL;
 }
 
 static void triggerTweakFeature(const char *selName, const char *swKey, BOOL state) {
-    Class defsCls = cls("NSUserDefaults");
-    if (defsCls) {
-        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-        if (defs) {
-            Class strCls = cls("NSString");
-            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), swKey);
-            if (key) {
-                ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), state, key);
-                ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    @autoreleasepool {
+        Class defsCls = cls("NSUserDefaults");
+        if (defsCls) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                Class strCls = cls("NSString");
+                id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), swKey);
+                if (key) {
+                    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), state, key);
+                    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+                }
             }
         }
-    }
 
-    Class nsObj = cls("NSObject");
-    SEL fSel = sel(selName);
-    if (nsObj && ((BOOL (*)(id, SEL, SEL))objc_msgSend)((id)nsObj, sel("respondsToSelector:"), fSel)) {
-        id sender = getSwitchSender(state);
-        ((void (*)(id, SEL, id))objc_msgSend)((id)nsObj, fSel, sender);
+        Class nsObj = cls("NSObject");
+        SEL fSel = sel(selName);
+        if (nsObj) {
+            Method m = class_getClassMethod(nsObj, fSel);
+            if (!m) m = class_getInstanceMethod(nsObj, fSel);
+            if (m) {
+                IMP imp = method_getImplementation(m);
+                id sender = getSwitchSender(state);
+                if (imp && sender) {
+                    printf("[FlyMenuUI] Executing %s (state=%d)\n", selName, (int)state);
+                    ((void (*)(id, SEL, id))imp)((id)nsObj, fSel, sender);
+                    printf("[FlyMenuUI] Completed %s (state=%d)\n", selName, (int)state);
+                }
+            }
+        }
     }
 }
 
@@ -685,12 +691,19 @@ static void toggleOneHit_imp(id self, SEL _cmd, id sender) {
     BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
     BOOL newState = !cur;
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        triggerTweakFeature("feature7:", "sw7", newState);
+    // Immediately save state synchronously so UI updates instantly with zero latency
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
+            triggerTweakFeature("feature7:", "sw7", newState);
+            g_vipScanActive = 0;
+        }
     });
 
     printf("[FlyMenuUI] 1 Hit Kill VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
-    updateRowStates();
 }
 
 // Speed Epic VIP Toggle (Button 7)
@@ -707,14 +720,19 @@ static void toggleSpeedEpic_imp(id self, SEL _cmd, id sender) {
     BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
     BOOL newState = !cur;
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // Trigger both feature6 (Speed Epic) and feature5 (Speed) for 100% reliable super speed
-        triggerTweakFeature("feature6:", "sw6", newState);
-        triggerTweakFeature("feature5:", "sw5", newState);
+    // Immediately save state synchronously so UI updates instantly with zero latency
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
+            triggerTweakFeature("feature6:", "sw6", newState);
+            g_vipScanActive = 0;
+        }
     });
 
     printf("[FlyMenuUI] Speed Epic VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
-    updateRowStates();
 }
 
 // No Recoil 100% VIP Toggle (Button 8)
@@ -731,13 +749,20 @@ static void toggleNoRecoil_imp(id self, SEL _cmd, id sender) {
     BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
     BOOL newState = !cur;
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        triggerTweakFeature("feature2:", "sw2", newState);
-        triggerTweakFeature("feature4:", "sw4", newState);
+    // Immediately save state synchronously so UI updates instantly with zero latency
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
+            triggerTweakFeature("feature2:", "sw2", newState);
+            triggerTweakFeature("feature4:", "sw4", newState);
+            g_vipScanActive = 0;
+        }
     });
 
     printf("[FlyMenuUI] No Recoil 100%% VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
-    updateRowStates();
 }
 
 // Wallhack VIP Toggle (Button 9)
@@ -754,12 +779,19 @@ static void toggleWallhack_imp(id self, SEL _cmd, id sender) {
     BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
     BOOL newState = !cur;
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        triggerTweakFeature("feature1:", "sw1", newState);
+    // Immediately save state synchronously so UI updates instantly with zero latency
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
+        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
+            triggerTweakFeature("feature1:", "sw1", newState);
+            g_vipScanActive = 0;
+        }
     });
 
     printf("[FlyMenuUI] Wallhack VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
-    updateRowStates();
 }
 
 // Update layout of the buttons based on active tab filter
@@ -1616,7 +1648,7 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
-        class_addMethod(uiMgrCls, sel("isOn"), (IMP)swIsOn_imp, "B@:");
+        class_addMethod(uiMgrCls, sel("isOn"), (IMP)swIsOn_fallback, "B@:");
         objc_registerClassPair(uiMgrCls);
         g_uiMgr = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiMgrCls, sel("alloc")), sel("init"));
     }
