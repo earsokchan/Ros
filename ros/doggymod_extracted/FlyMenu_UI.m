@@ -589,9 +589,9 @@ static void setupMenuUI(id win, id panel) {
                 const char *utf = title ? (const char *)((id (*)(id, SEL))objc_msgSend)(title, sel("UTF8String")) : "";
                 if (strstr(utf, "FLY") != NULL || (i == 0 && !g_coreBtns[0])) {
                     g_coreBtns[0] = sub; // Fly Hack
-                } else if (strcmp(utf, "UP") == 0 || (i == 1 && !g_coreBtns[1])) {
+                } else if (strstr(utf, "UP") != NULL || (i == 1 && !g_coreBtns[1])) {
                     g_coreBtns[1] = sub; // Ascend (Up)
-                } else if (strcmp(utf, "DOWN") == 0 || (i == 2 && !g_coreBtns[2])) {
+                } else if (strstr(utf, "DOWN") != NULL || (i == 2 && !g_coreBtns[2])) {
                     g_coreBtns[2] = sub; // Descend (Down)
                 } else if (strstr(utf, "AIM") != NULL || (i == 4 && !g_coreBtns[3])) {
                     g_coreBtns[3] = sub; // Aimbot

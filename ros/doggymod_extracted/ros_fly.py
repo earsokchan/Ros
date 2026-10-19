@@ -36,7 +36,7 @@ Timer = _resolve_game_timer()
 BUILD = 'ROS-FLY-TEST-9'
 _enabled = False
 _vertical = 0
-_speed = 30.0
+_speed = 300.0  # Ultra-fast responsive vertical speed (10x faster than original 30.0)
 _horizontal_multiplier = 12.0
 _horizontal_limit = 1200.0
 _walk_api_scale = 60.0
@@ -95,7 +95,6 @@ def _position(character):
 
 def _movement_eligible(unit):
     return (getattr(unit, '_active', False) and
-            getattr(unit, '_enableMove', False) and
             getattr(unit, 'chInScene', False) and
             not getattr(unit, 'inVehicle', False) and
             not getattr(unit, '_useParachute', False) and
@@ -253,8 +252,8 @@ def handle(action, argument=0):
 def set_speed(value):
     global _speed
     value = float(value)
-    if not (0.5 <= value <= 30.0):
-        raise ValueError('Fly speed must be between 0.5 and 30 game units/second')
+    if not (0.5 <= value <= 2000.0):
+        raise ValueError('Fly speed must be between 0.5 and 2000 game units/second')
     _speed = value
 
 
@@ -308,7 +307,6 @@ def _tick():
             _stop_timer()
             return
         if not _movement_eligible(unit):
-            _restore()
             _vertical = 0
             _state = 3
             return
@@ -346,21 +344,15 @@ def _before_character_removed(unit):
 
 
 def _install_lifecycle_hooks():
-    # These operations replace/remove a character, so restore it beforehand.
+    # Only hook OnDestroy when the character unit is actually destroyed
     if getattr(MoveUnit, '_ros_fly_lifecycle_installed', False):
         return
-    original_reset = MoveUnit.resetCharacterParams
     original_destroy = MoveUnit.OnDestroy
-
-    def reset(unit, *args, **kwargs):
-        _before_character_removed(unit)
-        return original_reset(unit, *args, **kwargs)
 
     def destroy(unit, *args, **kwargs):
         _before_character_removed(unit)
         return original_destroy(unit, *args, **kwargs)
 
-    MoveUnit.resetCharacterParams = reset
     MoveUnit.OnDestroy = destroy
     MoveUnit._ros_fly_lifecycle_installed = True
 
