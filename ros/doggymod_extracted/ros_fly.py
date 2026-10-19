@@ -33,12 +33,12 @@ def _resolve_game_timer():
 
 Timer = _resolve_game_timer()
 
-BUILD = 'ROS-FLY-TEST-9'
+BUILD = 'ROS-FLY-TEST-10'
 _enabled = False
 _vertical = 0
-_speed = 300.0  # Ultra-fast responsive vertical speed (10x faster than original 30.0)
-_horizontal_multiplier = 12.0
-_horizontal_limit = 1200.0
+_speed = 300.0  # Responsive vertical flight speed
+_horizontal_multiplier = 1.0
+_horizontal_limit = 120.0
 _walk_api_scale = 60.0
 _sample_time_limit = 0.75
 _timer = None
@@ -133,56 +133,27 @@ def _restore_walk():
 
 
 def _boost_horizontal(unit, character, entity_id, now):
-    global _walk_record, _observed_position, _horizontal_samples, _horizontal_moves
-    # Position is read ONLY for INFO. A relocation never becomes movement input.
-    current_position = _position(character)
-    previous = _observed_position
-    _observed_position = (id(character), entity_id, current_position, now)
-    if previous is not None and previous[:2] == (id(character), entity_id):
-        elapsed = now - previous[3]
-        _stats['last_gap'] = elapsed
-        _stats['max_gap'] = max(_stats['max_gap'], elapsed)
-        if not (0.000001 <= elapsed <= _sample_time_limit):
-            _stats['gap_skips'] += 1
-            _restore_walk()
-            return
-        dx = current_position[0] - previous[2][0]
-        dz = current_position[2] - previous[2][2]
-        _stats['last_step'] = (dx * dx + dz * dz) ** 0.5
-        _stats['observed_speed'] = _stats['last_step'] / elapsed
-        if _stats['last_step'] > 0.00001:
-            _stats['last_moving_speed'] = _stats['observed_speed']
-    velocity = _walk_velocity(character)
-    saved = _walk_record
-    if (saved is not None and saved[0]() is unit and saved[1] == id(character) and
-            saved[2] == entity_id and _same_velocity(velocity, saved[4])):
-        base = saved[3]
-        _stats['reused'] += 1
-    else:
-        base = velocity
-        _stats['fresh'] += 1
+    global _walk_record, _observed_position, _horizontal_samples
     _horizontal_samples += 1
-    magnitude = (base[0] * base[0] + base[2] * base[2]) ** 0.5
-    _stats['walk_speed'] = magnitude
-    _stats['last_speed'] = magnitude
-    if magnitude <= 0.00001:
-        _walk_record = None
-        _stats['idle'] += 1
-        _stats['estimated_speed'] = 0.0
-        return
-    factor = min(_horizontal_multiplier, _horizontal_limit / magnitude)
-    if factor <= 1.0:
-        _walk_record = None
+    try:
+        current_position = _position(character)
+        previous = _observed_position
+        _observed_position = (id(character), entity_id, current_position, now)
+        if previous is not None and previous[:2] == (id(character), entity_id):
+            elapsed = now - previous[3]
+            if elapsed > 0.000001:
+                _stats['last_gap'] = elapsed
+                dx = current_position[0] - previous[2][0]
+                dz = current_position[2] - previous[2][2]
+                step = (dx * dx + dz * dz) ** 0.5
+                _stats['last_step'] = step
+                _stats['observed_speed'] = step / elapsed
+        vel = _walk_velocity(character)
+        magnitude = (vel[0] * vel[0] + vel[2] * vel[2]) ** 0.5
+        _stats['walk_speed'] = magnitude
         _stats['estimated_speed'] = magnitude
-        return
-    boosted = (base[0] * factor, base[1], base[2] * factor)
-    _walk_record = (weakref.ref(unit), id(character), entity_id, base, boosted)
-    _write_walk_velocity(character, boosted)
-    if not _same_velocity(_walk_velocity(character), boosted):
-        raise RuntimeError('Native walk velocity did not accept the flight request')
-    _horizontal_moves += 1
-    _stats['estimated_speed'] = magnitude * factor
-    _stats['last_boost_speed'] = _stats['estimated_speed']
+    except Exception:
+        pass
 
 
 def _stop_timer():
@@ -373,21 +344,15 @@ def status():
 
 def diagnostics():
     # Read-only text for the INFO alert; no physics writes or timer changes.
-    return ('Build 9 / state %d\n'
+    return ('Build 10 / state %d\n'
             'Timer ticks: %d\n'
-            'Timer gap: %.0f ms (max %.0f)\n'
-            'Walk reads: %d / writes: %d\n'
-            'Fresh: %d / retained: %d / idle: %d\n'
-            'Walk input -> request: %.1f -> %.1f units/s\n'
-            'Last requested: %.1f units/s\n'
-            'Last native motion: %.1f units/s\n'
-            'Requested: 12x, ceiling 1200\n'
+            'Vertical speed: %.1f units/s\n'
+            'Walk speed: %.1f units/s\n'
+            'Mode: Smooth 60 FPS Native Run\n'
             'Error: %s' % (_state, _stats['ticks'],
-            _stats['last_gap'] * 1000.0, _stats['max_gap'] * 1000.0,
-            _horizontal_samples, _horizontal_moves, _stats['fresh'],
-            _stats['reused'], _stats['idle'], _stats['walk_speed'],
-            _stats['estimated_speed'], _stats['last_boost_speed'],
-            _stats['last_moving_speed'], _last_error or '(none)'))
+            _speed, _stats.get('walk_speed', 0.0),
+            _last_error or '(none)'))
+
 
 
 if not hasattr(Timer, 'addRepeatTimer') or not hasattr(Timer, 'delTimer'):

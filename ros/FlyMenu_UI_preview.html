@@ -33,9 +33,9 @@
   #floatBtn:active { cursor:grabbing; }
   #floatBtn img { width:100%; height:100%; object-fit:contain; border-radius:27px; }
 
-  /* Menu panel — 280 x 345 */
+  /* Menu panel — 280 x 432 */
   #panel {
-    position:absolute; left:55px; top:200px; width:280px; height:345px;
+    position:absolute; left:55px; top:160px; width:280px; height:432px;
     background:rgba(13,13,18,0.98); border:2px solid #d41d1d; border-radius:16px;
     overflow:hidden; z-index:90; display:none; touch-action:none;
   }
@@ -66,9 +66,11 @@
   .tab {
     position:absolute; top:5px; width:65px; height:26px;
     background:#1c1c26; color:#a6a6b3; border:none; border-radius:5px;
-    font-size:11px; font-weight:700; cursor:pointer;
+    font-size:10.5px; font-weight:700; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; gap:4px;
   }
   .tab.active { background:#d41d1d; color:#fff; }
+  .tab svg { width:13px; height:13px; stroke:currentColor; fill:none; stroke-width:1.4; flex-shrink:0; }
   #tabDivider { position:absolute; left:0; top:35px; width:280px; height:1.5px; background:#d41d1d; }
 
   /* Feature rows — startY 84, rowH 38, gap 4, x 10, w 260 */
@@ -80,12 +82,18 @@
   .row.on { border-color:#d41d1d; }
   .pill {
     position:absolute; left:10px; top:8px; width:36px; height:22px;
-    background:#26262e; border-radius:11px;
+    background:#222228; border-radius:11px;
     display:flex; align-items:center; justify-content:center;
     color:#fff; font-size:10px; font-weight:700;
-    transition:background .12s;
+    transition:background .15s;
   }
-  .row.on .pill { background:#fff; }
+  .pill .knob {
+    position:absolute; left:2px; top:2px; width:18px; height:18px;
+    border-radius:9px; background:#7a7a85;
+    transition:transform .15s, background .15s;
+  }
+  .row.on .pill { background:#d41d1d; }
+  .row.on .pill .knob { transform:translateX(14px); background:#fff; }
   .row.on .pill.sym { color:#111; }
   .row .lbl {
     position:absolute; left:54px; top:0; width:202px; height:38px;
@@ -99,8 +107,8 @@
 </style>
 </head>
 <body>
-<h1>ROS DoggyMod — FlyMenu UI Preview (v2.4.0)</h1>
-<div class="hint">Tap 👑 logo to open · drag header/logo to move · click rows to toggle · tabs filter rows</div>
+<h1>ROS DoggyMod — FlyMenu UI Preview (v2.5.0)</h1>
+<div class="hint">Tap floating logo to open · drag header/logo to move · click rows to toggle · tabs filter rows</div>
 
 <div id="screen">
   <div class="hud" style="left:14px; top:14px;">HP 100 ▓▓▓▓▓▓▓▓▓▓</div>
@@ -118,10 +126,22 @@
     </div>
 
     <div id="tabBar">
-      <button class="tab" data-tab="0" style="left:4px;">🎯 Aim</button>
-      <button class="tab" data-tab="1" style="left:72px;">👁 Esp</button>
-      <button class="tab" data-tab="2" style="left:140px;">⚡ Fly</button>
-      <button class="tab" data-tab="3" style="left:208px;">📇 Info</button>
+      <button class="tab" data-tab="0" style="left:4px;">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="4.5"/><line x1="0" y1="8" x2="3" y2="8"/><line x1="13" y1="8" x2="16" y2="8"/><line x1="8" y1="0" x2="8" y2="3"/><line x1="8" y1="13" x2="8" y2="16"/><circle cx="8" cy="8" r="1" fill="currentColor"/></svg>
+        <span>AIM</span>
+      </button>
+      <button class="tab" data-tab="1" style="left:72px;">
+        <svg viewBox="0 0 16 16"><path d="M1 8 Q8 2 15 8 Q8 14 1 8 Z"/><circle cx="8" cy="8" r="2"/></svg>
+        <span>ESP</span>
+      </button>
+      <button class="tab" data-tab="2" style="left:140px;">
+        <svg viewBox="0 0 16 16"><path d="M8 1 L15 13 L8 10 L1 13 Z"/></svg>
+        <span>FLY</span>
+      </button>
+      <button class="tab" data-tab="3" style="left:208px;">
+        <svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><circle cx="8" cy="5" r="1" fill="currentColor"/><line x1="8" y1="7.5" x2="8" y2="11.5" stroke-width="1.6"/></svg>
+        <span>INFO</span>
+      </button>
       <div id="tabDivider"></div>
     </div>
 
@@ -137,27 +157,36 @@ const titles = [
   "Flight Descend (Down)",
   "Aimbot 360 Lock",
   "Esp Player Laser & Box",
-  "Flight Diagnostics & Info"
+  "Flight Diagnostics & Info",
+  "1 Hit Kill VIP",
+  "Speed Epic VIP",
+  "No Recoil 100% VIP",
+  "Wallhack VIP"
 ];
-const symbols = [ "", "▲", "▼", "", "", "ℹ" ];
-const tabFilter = { 0:[3], 1:[4], 2:[0,1,2], 3:[5] }; // Aim/Esp/Fly/Info
+const symbols = [ "", "▲", "▼", "", "", "ℹ", "", "", "", "" ];
+const tabFilter = { 0:[3,6,8], 1:[4,9], 2:[0,1,2,7], 3:[5] }; // Aim/Esp/Fly/Info
 
-const state = { fly:false, aim:false, esp:false, tab:-1, upHeld:false, downHeld:false };
+const state = { fly:false, aim:false, esp:false, oneHit:false, speedEpic:false, recoil:false, wallhack:false, tab:-1, upHeld:false, downHeld:false };
 const panel = document.getElementById('panel');
 const floatBtn = document.getElementById('floatBtn');
 
-// Build 6 rows
+// Build 10 rows
 const rows = titles.map((t,i) => {
   const r = document.createElement('div');
   r.className = 'row';
   r.dataset.idx = i;
-  r.innerHTML = `<div class="pill${symbols[i]?' sym':''}">${symbols[i]||''}</div><div class="lbl">${t}</div>`;
+  const isToggle = (i !== 1 && i !== 2 && i !== 5);
+  r.innerHTML = `<div class="pill${symbols[i]?' sym':''}">${isToggle ? '<div class="knob"></div>' : (symbols[i]||'')}</div><div class="lbl">${t}</div>`;
   panel.appendChild(r);
   r.addEventListener('click', () => {
     if (i === 0) state.fly = !state.fly;
     else if (i === 3) state.aim = !state.aim;
     else if (i === 4) state.esp = !state.esp;
     else if (i === 5) { /* Info: momentary */ }
+    else if (i === 6) state.oneHit = !state.oneHit;
+    else if (i === 7) state.speedEpic = !state.speedEpic;
+    else if (i === 8) state.recoil = !state.recoil;
+    else if (i === 9) state.wallhack = !state.wallhack;
     render();
   });
   // Up/Down hold feedback (isHighlighted equivalent)
@@ -188,7 +217,7 @@ function render() {
     r.style.display = show ? 'block' : 'none';
     if (show) { r.style.top = (startY + visible*(rowH+gap)) + 'px'; visible++; }
 
-    const on = (i===0 && state.fly) || (i===3 && state.aim) || (i===4 && state.esp);
+    const on = (i===0 && state.fly) || (i===3 && state.aim) || (i===4 && state.esp) || (i===6 && state.oneHit) || (i===7 && state.speedEpic) || (i===8 && state.recoil) || (i===9 && state.wallhack);
     r.classList.toggle('on', on);
 
     // Up/Down: pressed pill turns red, dimmed when fly is off
@@ -198,6 +227,7 @@ function render() {
       r.classList.toggle('dim', !state.fly);
     }
   });
+  panel.style.height = Math.max(220, startY + visible*(rowH+gap) + 12) + 'px';
   document.querySelectorAll('.tab').forEach(b =>
     b.classList.toggle('active', +b.dataset.tab === state.tab));
 }

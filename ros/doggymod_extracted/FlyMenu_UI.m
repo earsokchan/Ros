@@ -9,9 +9,13 @@
 #include <mach-o/dyld.h>
 
 #include "embedded_scripts.h"
+#import "embedded_header_png.h"
 
 #define sel(s) sel_registerName(s)
 #define cls(c) objc_getClass(c)
+
+extern void *objc_autoreleasePoolPush(void);
+extern void objc_autoreleasePoolPop(void *pool);
 
 struct CGPoint { double x; double y; };
 typedef struct CGPoint CGPoint;
@@ -45,6 +49,7 @@ typedef CGPoint (*msgSend_pt_id)(id, SEL, id);
 typedef void (*msgSend_void_pt_id)(id, SEL, CGPoint, id);
 typedef CGPoint (*msgSend_pt)(id, SEL);
 typedef void (*msgSend_void_pt)(id, SEL, CGPoint);
+typedef void (*msgSend_void_pt_pt)(id, SEL, CGPoint, CGPoint);
 typedef void (*msgSend_void_long)(id, SEL, long);
 typedef void (*msgSend_void_id)(id, SEL, id);
 typedef void (*msgSend_void_id_long)(id, SEL, id, long);
@@ -57,13 +62,18 @@ static id g_panel = NULL;
 static id g_floatBtn = NULL;
 static id (*orig_pathForResource)(id self, SEL _cmd, id name, id ext) = NULL;
 
-// References to the 6 native core buttons created by FlyMenu_core.dylib
-#define NUM_BUTTONS 6
-static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info
+// References to native core buttons + custom VIP buttons
+#define NUM_BUTTONS 10
+static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack
 static id g_rowPills[NUM_BUTTONS] = { NULL };    // Toggle switch indicators
+static id g_rowKnobs[NUM_BUTTONS] = { NULL };    // Inner sliding thumb knob
 static id g_rowLabels[NUM_BUTTONS] = { NULL };   // Clean titles
 static id g_tabBtns[4] = { NULL };              // 0:Aim, 1:Esp, 2:Fly, 3:Info
+static id g_tabIcons[4] = { NULL };             // Vector CAShapeLayer icons
+static id g_tabLabels[4] = { NULL };            // Clean tab text labels
 static int g_selectedTab = -1;                  // -1 = Show All
+
+static void updateRowStates(void);
 
 // Rich ESP Overlay Globals
 static id g_espOverlay = NULL;
@@ -212,29 +222,48 @@ static id getActiveWindow(void) {
     return NULL;
 }
 
-static id findFlyPanel(id win) {
-    if (!win) return NULL;
-    id subviews = ((id (*)(id, SEL))objc_msgSend)(win, sel("subviews"));
-    if (!subviews) return NULL;
-    long count = (long)((long (*)(id, SEL))objc_msgSend)(subviews, sel("count"));
+// Comprehensive search for FlyMenu_core's panel across ALL UIWindows
+// Note: DLGMem views are preserved untouched so DLG operates smoothly alongside FlyMenu.
+static id findFlyPanel(void) {
+    Class uiApp = cls("UIApplication");
+    if (!uiApp) return NULL;
+    id app = ((id (*)(id, SEL))objc_msgSend)((id)uiApp, sel("sharedApplication"));
+    if (!app) return NULL;
+    id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel("windows"));
+    if (!windows) return NULL;
+    long winCount = (long)((long (*)(id, SEL))objc_msgSend)(windows, sel("count"));
     Class btnCls = cls("UIButton");
     if (!btnCls) return NULL;
 
-    for (long i = 0; i < count; i++) {
-        id v = ((msgSend_id_long)objc_msgSend)(subviews, sel("objectAtIndex:"), i);
-        if (!v) continue;
-        id innerSubs = ((id (*)(id, SEL))objc_msgSend)(v, sel("subviews"));
-        if (!innerSubs) continue;
-        long innerCount = (long)((long (*)(id, SEL))objc_msgSend)(innerSubs, sel("count"));
-        for (long j = 0; j < innerCount; j++) {
-            id sub = ((msgSend_id_long)objc_msgSend)(innerSubs, sel("objectAtIndex:"), j);
-            if (!sub) continue;
-            if ((long)((long (*)(id, SEL, id))objc_msgSend)(sub, sel("isKindOfClass:"), (id)btnCls)) {
-                id title = ((msgSend_id_long)objc_msgSend)(sub, sel("titleForState:"), 0);
-                if (title) {
-                    const char *utf = (const char *)((id (*)(id, SEL))objc_msgSend)(title, sel("UTF8String"));
-                    if (utf && (strstr(utf, "FLY") != NULL || strstr(utf, "ESP") != NULL || strstr(utf, "AIM") != NULL)) {
-                        return v;
+    for (long w = 0; w < winCount; w++) {
+        id win = ((msgSend_id_long)objc_msgSend)(windows, sel("objectAtIndex:"), w);
+        if (!win) continue;
+        id subviews = ((id (*)(id, SEL))objc_msgSend)(win, sel("subviews"));
+        if (!subviews) continue;
+        long count = (long)((long (*)(id, SEL))objc_msgSend)(subviews, sel("count"));
+        for (long i = 0; i < count; i++) {
+            id v = ((msgSend_id_long)objc_msgSend)(subviews, sel("objectAtIndex:"), i);
+            if (!v || v == g_floatBtn || v == g_espOverlay) continue;
+
+            // Never interfere with DLG views
+            const char *cname = object_getClassName(v);
+            if (cname && (strstr(cname, "DLG") != NULL || strstr(cname, "dlg") != NULL)) continue;
+
+            id innerSubs = ((id (*)(id, SEL))objc_msgSend)(v, sel("subviews"));
+            if (!innerSubs) continue;
+            long innerCount = (long)((long (*)(id, SEL))objc_msgSend)(innerSubs, sel("count"));
+            if (innerCount < 6) continue;
+
+            for (long j = 0; j < innerCount; j++) {
+                id sub = ((msgSend_id_long)objc_msgSend)(innerSubs, sel("objectAtIndex:"), j);
+                if (!sub) continue;
+                if ((long)((long (*)(id, SEL, id))objc_msgSend)(sub, sel("isKindOfClass:"), (id)btnCls)) {
+                    id title = ((msgSend_id_long)objc_msgSend)(sub, sel("titleForState:"), 0);
+                    if (title) {
+                        const char *utf = (const char *)((id (*)(id, SEL))objc_msgSend)(title, sel("UTF8String"));
+                        if (utf && (strstr(utf, "FLY") != NULL || strstr(utf, "ESP") != NULL || strstr(utf, "AIM") != NULL)) {
+                            return v;
+                        }
                     }
                 }
             }
@@ -243,11 +272,12 @@ static id findFlyPanel(id win) {
     return NULL;
 }
 
-// Load header.png or back.png
+// 100% reliable logo image loader with embedded in-memory fallback
 static id loadLogoImage(void) {
     Class uiImg = cls("UIImage");
     Class nsString = cls("NSString");
-    if (!uiImg || !nsString) return NULL;
+    Class nsData = cls("NSData");
+    if (!uiImg) return NULL;
 
     const char *candPaths[] = {
         "/Library/MobileSubstrate/DynamicLibraries/D79oM.bundle/header.png",
@@ -262,7 +292,7 @@ static id loadLogoImage(void) {
         NULL
     };
     for (int k = 0; candPaths[k]; k++) {
-        if (access(candPaths[k], R_OK) == 0) {
+        if (access(candPaths[k], R_OK) == 0 && nsString) {
             id p = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), candPaths[k]);
             if (p) {
                 id img = ((msgSend_id_id)objc_msgSend)((id)uiImg, sel("imageWithContentsOfFile:"), p);
@@ -272,7 +302,7 @@ static id loadLogoImage(void) {
     }
 
     id mb = ((id (*)(id, SEL))objc_msgSend)((id)cls("NSBundle"), sel("mainBundle"));
-    if (mb) {
+    if (mb && nsString) {
         id bPath = ((id (*)(id, SEL))objc_msgSend)(mb, sel("bundlePath"));
         if (bPath) {
             const char *bStr = (const char *)((id (*)(id, SEL))objc_msgSend)(bPath, sel("UTF8String"));
@@ -297,7 +327,107 @@ static id loadLogoImage(void) {
             }
         }
     }
+
+    // Direct in-memory embedded fallback: 100% guaranteed to return user's logo on all devices
+    if (nsData) {
+        id data = ((id (*)(id, SEL, const void *, unsigned long))objc_msgSend)((id)nsData, sel("dataWithBytes:length:"), EMBEDDED_HEADER_PNG, EMBEDDED_HEADER_PNG_LEN);
+        if (data) {
+            id img = ((msgSend_id_id)objc_msgSend)((id)uiImg, sel("imageWithData:"), data);
+            if (img) return img;
+        }
+    }
     return NULL;
+}
+
+// Clean vector icons for tabs (AIM, ESP, FLY, INFO) — ZERO emojis
+static id createTabIconLayer(int tabIndex, id color) {
+    Class shapeCls = cls("CAShapeLayer");
+    Class bPathCls = cls("UIBezierPath");
+    if (!shapeCls || !bPathCls) return NULL;
+
+    id layer = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("alloc")), sel("init"));
+    if (!layer) return NULL;
+
+    id path = ((id (*)(id, SEL))objc_msgSend)((id)bPathCls, sel("bezierPath"));
+    if (!path) return NULL;
+
+    Class uiColor = cls("UIColor");
+    id clearColor = uiColor ? ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("clearColor")) : NULL;
+    id cgClear = clearColor ? ((id (*)(id, SEL))objc_msgSend)(clearColor, sel("CGColor")) : NULL;
+    id cgColor = color ? ((id (*)(id, SEL))objc_msgSend)(color, sel("CGColor")) : NULL;
+
+    if (tabIndex == 0) {
+        // Tab 0: AIM — Precision Crosshair Reticle
+        id circlePath = ((msgSend_id_rect)objc_msgSend)((id)bPathCls, sel("bezierPathWithOvalInRect:"), CGRectMake(2.5, 2.5, 9.0, 9.0));
+        if (circlePath) ((msgSend_void_id)objc_msgSend)(path, sel("appendPath:"), circlePath);
+
+        // 4 Reticle Ticks
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(0.0, 7.0));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(2.5, 7.0));
+
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(11.5, 7.0));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(14.0, 7.0));
+
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(7.0, 0.0));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(7.0, 2.5));
+
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(7.0, 11.5));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(7.0, 14.0));
+
+        // Center dot
+        id dotPath = ((msgSend_id_rect)objc_msgSend)((id)bPathCls, sel("bezierPathWithOvalInRect:"), CGRectMake(6.0, 6.0, 2.0, 2.0));
+        if (dotPath) ((msgSend_void_id)objc_msgSend)(path, sel("appendPath:"), dotPath);
+
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setFillColor:"), cgClear);
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setStrokeColor:"), cgColor);
+        ((msgSend_void_double)objc_msgSend)(layer, sel("setLineWidth:"), 1.2);
+    } else if (tabIndex == 1) {
+        // Tab 1: ESP — Vision Eye / Scanner
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(1.0, 7.0));
+        ((msgSend_void_pt_pt)objc_msgSend)(path, sel("addQuadCurveToPoint:controlPoint:"), CGPointMake(13.0, 7.0), CGPointMake(7.0, 1.5));
+        ((msgSend_void_pt_pt)objc_msgSend)(path, sel("addQuadCurveToPoint:controlPoint:"), CGPointMake(1.0, 7.0), CGPointMake(7.0, 12.5));
+
+        // Pupil
+        id pupilPath = ((msgSend_id_rect)objc_msgSend)((id)bPathCls, sel("bezierPathWithOvalInRect:"), CGRectMake(5.0, 5.0, 4.0, 4.0));
+        if (pupilPath) ((msgSend_void_id)objc_msgSend)(path, sel("appendPath:"), pupilPath);
+
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setFillColor:"), cgClear);
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setStrokeColor:"), cgColor);
+        ((msgSend_void_double)objc_msgSend)(layer, sel("setLineWidth:"), 1.2);
+    } else if (tabIndex == 2) {
+        // Tab 2: FLY — Supersonic Jet / Wing
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(7.0, 1.0));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(13.5, 12.5));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(7.0, 9.5));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(0.5, 12.5));
+        ((id (*)(id, SEL))objc_msgSend)(path, sel("closePath"));
+
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setFillColor:"), cgClear);
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setStrokeColor:"), cgColor);
+        ((msgSend_void_double)objc_msgSend)(layer, sel("setLineWidth:"), 1.2);
+    } else {
+        // Tab 3: INFO — Clean Info Glyph
+        id circlePath = ((msgSend_id_rect)objc_msgSend)((id)bPathCls, sel("bezierPathWithOvalInRect:"), CGRectMake(1.0, 1.0, 12.0, 12.0));
+        if (circlePath) ((msgSend_void_id)objc_msgSend)(path, sel("appendPath:"), circlePath);
+
+        // Dot
+        id dotPath = ((msgSend_id_rect)objc_msgSend)((id)bPathCls, sel("bezierPathWithOvalInRect:"), CGRectMake(6.2, 3.2, 1.6, 1.6));
+        if (dotPath) ((msgSend_void_id)objc_msgSend)(path, sel("appendPath:"), dotPath);
+
+        // Stem
+        ((msgSend_void_pt)objc_msgSend)(path, sel("moveToPoint:"), CGPointMake(7.0, 6.2));
+        ((msgSend_void_pt)objc_msgSend)(path, sel("addLineToPoint:"), CGPointMake(7.0, 10.2));
+
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setFillColor:"), cgClear);
+        ((msgSend_void_id)objc_msgSend)(layer, sel("setStrokeColor:"), cgColor);
+        ((msgSend_void_double)objc_msgSend)(layer, sel("setLineWidth:"), 1.2);
+    }
+
+    id cgPath = ((id (*)(id, SEL))objc_msgSend)(path, sel("CGPath"));
+    if (cgPath) ((msgSend_void_id)objc_msgSend)(layer, sel("setPath:"), cgPath);
+
+    ((msgSend_void_rect)objc_msgSend)(layer, sel("setFrame:"), CGRectMake(6, 6, 14, 14));
+    return layer;
 }
 
 static void handleFloatPan_imp(id self, SEL _cmd, id recognizer) {
@@ -331,10 +461,9 @@ static void toggleMenu_imp(id self, SEL _cmd, id sender) {
     long isHidden = (long)((long (*)(id, SEL))objc_msgSend)(g_panel, sel("isHidden"));
     if (isHidden) {
         ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 0);
-        id win = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("window"));
-        if (!win) win = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
-        if (win) {
-            ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_panel);
+        id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+        if (pSuper) {
+            ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
         }
     } else {
         ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 1);
@@ -346,7 +475,151 @@ static void closeMenu_imp(id self, SEL _cmd, id sender) {
     ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 1);
 }
 
-// Update layout of the 6 core buttons based on active tab filter
+// 1 Hit Kill VIP Toggle (Button 6)
+static void toggleOneHit_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw7");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    // 1. Save state
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    // 2. Trigger ros.dylib's memory patch engine via +[NSObject feature7:]
+    Class nsObj = cls("NSObject");
+    SEL f7Sel = sel("feature7:");
+    if (nsObj && ((BOOL (*)(id, SEL, SEL))objc_msgSend)((id)nsObj, sel("respondsToSelector:"), f7Sel)) {
+        Class uiSw = cls("UISwitch");
+        if (uiSw) {
+            id fakeSw = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiSw, sel("alloc")), sel("init"));
+            if (fakeSw) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(fakeSw, sel("setOn:"), newState);
+                ((void (*)(id, SEL, id))objc_msgSend)((id)nsObj, f7Sel, fakeSw);
+            }
+        }
+    }
+
+    printf("[FlyMenuUI] 1 Hit Kill VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    updateRowStates();
+}
+
+// Speed Epic VIP Toggle (Button 7)
+static void toggleSpeedEpic_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    // 1. Save state
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    // 2. Trigger ros.dylib's memory patch engine via +[NSObject feature6:]
+    Class nsObj = cls("NSObject");
+    SEL f6Sel = sel("feature6:");
+    if (nsObj && ((BOOL (*)(id, SEL, SEL))objc_msgSend)((id)nsObj, sel("respondsToSelector:"), f6Sel)) {
+        Class uiSw = cls("UISwitch");
+        if (uiSw) {
+            id fakeSw = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiSw, sel("alloc")), sel("init"));
+            if (fakeSw) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(fakeSw, sel("setOn:"), newState);
+                ((void (*)(id, SEL, id))objc_msgSend)((id)nsObj, f6Sel, fakeSw);
+            }
+        }
+    }
+
+    printf("[FlyMenuUI] Speed Epic VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    updateRowStates();
+}
+
+// No Recoil 100% VIP Toggle (Button 8)
+static void toggleNoRecoil_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw2");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    // 1. Save state
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    // 2. Trigger ros.dylib's memory patch engine via +[NSObject feature2:]
+    Class nsObj = cls("NSObject");
+    SEL f2Sel = sel("feature2:");
+    if (nsObj && ((BOOL (*)(id, SEL, SEL))objc_msgSend)((id)nsObj, sel("respondsToSelector:"), f2Sel)) {
+        Class uiSw = cls("UISwitch");
+        if (uiSw) {
+            id fakeSw = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiSw, sel("alloc")), sel("init"));
+            if (fakeSw) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(fakeSw, sel("setOn:"), newState);
+                ((void (*)(id, SEL, id))objc_msgSend)((id)nsObj, f2Sel, fakeSw);
+            }
+        }
+    }
+
+    printf("[FlyMenuUI] No Recoil 100%% VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    updateRowStates();
+}
+
+// Wallhack VIP Toggle (Button 9)
+static void toggleWallhack_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw1");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    // 1. Save state
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    // 2. Trigger ros.dylib's memory patch engine via +[NSObject feature1:]
+    Class nsObj = cls("NSObject");
+    SEL f1Sel = sel("feature1:");
+    if (nsObj && ((BOOL (*)(id, SEL, SEL))objc_msgSend)((id)nsObj, sel("respondsToSelector:"), f1Sel)) {
+        Class uiSw = cls("UISwitch");
+        if (uiSw) {
+            id fakeSw = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiSw, sel("alloc")), sel("init"));
+            if (fakeSw) {
+                ((void (*)(id, SEL, BOOL))objc_msgSend)(fakeSw, sel("setOn:"), newState);
+                ((void (*)(id, SEL, id))objc_msgSend)((id)nsObj, f1Sel, fakeSw);
+            }
+        }
+    }
+
+    printf("[FlyMenuUI] Wallhack VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    updateRowStates();
+}
+
+// Update layout of the buttons based on active tab filter
 static void updateRowLayout(void) {
     double startY = 84.0;
     double rowH = 38.0;
@@ -359,14 +632,14 @@ static void updateRowLayout(void) {
 
         BOOL show = YES;
         if (g_selectedTab == 0) {
-            // Aim tab: show Aim button (index 3)
-            show = (i == 3);
+            // Aim/Combat tab: show Aim (3), 1 Hit (6), No Recoil (8)
+            show = (i == 3 || i == 6 || i == 8);
         } else if (g_selectedTab == 1) {
-            // ESP tab: show ESP button (index 4)
-            show = (i == 4);
+            // ESP/Vision tab: show ESP (4), Wallhack (9)
+            show = (i == 4 || i == 9);
         } else if (g_selectedTab == 2) {
-            // Fly tab: show Fly, Up, Down buttons (indices 0, 1, 2)
-            show = (i == 0 || i == 1 || i == 2);
+            // Fly / Mobility tab: show Fly, Up, Down, Speed Epic (indices 0, 1, 2, 7)
+            show = (i == 0 || i == 1 || i == 2 || i == 7);
         } else if (g_selectedTab == 3) {
             // Info tab: show Info button (index 5)
             show = (i == 5);
@@ -378,6 +651,14 @@ static void updateRowLayout(void) {
             ((msgSend_void_rect)objc_msgSend)(btn, sel("setFrame:"), f);
             visibleIdx++;
         }
+    }
+
+    if (g_panel) {
+        CGRect pFrame = ((msgSend_rect)objc_msgSend)(g_panel, sel("frame"));
+        double newH = startY + visibleIdx * (rowH + gap) + 12.0;
+        if (newH < 220.0) newH = 220.0;
+        pFrame.size.height = newH;
+        ((msgSend_void_rect)objc_msgSend)(g_panel, sel("setFrame:"), pFrame);
     }
 }
 
@@ -395,6 +676,8 @@ static void selectTab_imp(id self, SEL _cmd, id sender) {
     id inactiveBg = uiColor ? ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.11, 0.11, 0.15, 1.0) : NULL;
     id whiteColor = uiColor ? ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor")) : NULL;
     id greyColor = uiColor ? ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.65, 0.65, 0.70, 1.0) : NULL;
+    id cgWhite = whiteColor ? ((id (*)(id, SEL))objc_msgSend)(whiteColor, sel("CGColor")) : NULL;
+    id cgGrey = greyColor ? ((id (*)(id, SEL))objc_msgSend)(greyColor, sel("CGColor")) : NULL;
 
     for (int t = 0; t < 4; t++) {
         if (!g_tabBtns[t]) continue;
@@ -402,24 +685,49 @@ static void selectTab_imp(id self, SEL _cmd, id sender) {
         if (activeBg && inactiveBg) {
             ((msgSend_void_id)objc_msgSend)(g_tabBtns[t], sel("setBackgroundColor:"), isSel ? activeBg : inactiveBg);
         }
-        if (whiteColor && greyColor) {
-            ((msgSend_id_id_long)objc_msgSend)(g_tabBtns[t], sel("setTitleColor:forState:"), isSel ? whiteColor : greyColor, 0);
+        if (g_tabLabels[t] && whiteColor && greyColor) {
+            ((msgSend_void_id)objc_msgSend)(g_tabLabels[t], sel("setTextColor:"), isSel ? whiteColor : greyColor);
+        }
+        if (g_tabIcons[t] && cgWhite && cgGrey) {
+            ((msgSend_void_id)objc_msgSend)(g_tabIcons[t], sel("setStrokeColor:"), isSel ? cgWhite : cgGrey);
         }
     }
 
     updateRowLayout();
 }
 
-// Update pill colors & button card borders based on real core engine state
+// Switch state helper for realistic switch knob + colored pill
+static void setSwitchState(int idx, BOOL on, id onPillBg, id offPillBg, id whiteColor, id knobOffColor, id activeBorder, id normalBorder) {
+    if (g_rowPills[idx]) {
+        ((msgSend_void_id)objc_msgSend)(g_rowPills[idx], sel("setBackgroundColor:"), on ? onPillBg : offPillBg);
+    }
+    if (g_rowKnobs[idx]) {
+        ((msgSend_void_rect)objc_msgSend)(g_rowKnobs[idx], sel("setFrame:"), CGRectMake(on ? 16 : 2, 2, 18, 18));
+        if (whiteColor && knobOffColor) {
+            ((msgSend_void_id)objc_msgSend)(g_rowKnobs[idx], sel("setBackgroundColor:"), on ? whiteColor : knobOffColor);
+        }
+    }
+    if (g_coreBtns[idx]) {
+        id layer = ((id (*)(id, SEL))objc_msgSend)(g_coreBtns[idx], sel("layer"));
+        if (layer && activeBorder && normalBorder) {
+            id c = ((id (*)(id, SEL))objc_msgSend)(on ? activeBorder : normalBorder, sel("CGColor"));
+            ((msgSend_void_id)objc_msgSend)(layer, sel("setBorderColor:"), c);
+        }
+    }
+}
+
+// Update pill colors, knob positions & button card borders based on real core engine state
 static void updateRowStates(void) {
     Class uiColor = cls("UIColor");
     if (!uiColor) return;
 
     id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
     id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.15, 0.15, 0.18, 1.0);
+    id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
     id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
     id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.14, 0.14, 0.18, 1.0);
     id darkBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.08, 0.08, 0.11, 1.0);
+    id knobOffColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.50, 0.55, 1.0);
 
     // Keep native button title text hidden so only our clean UI shows
     for (int i = 0; i < NUM_BUTTONS; i++) {
@@ -437,65 +745,92 @@ static void updateRowStates(void) {
 
     // Fly State (Button 0)
     BOOL flyOn = NO;
-    if (g_coreBtns[0] && g_rowPills[0]) {
+    if (g_coreBtns[0]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[0], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        flyOn = (strstr(s, "ON") != NULL);
-        ((msgSend_void_id)objc_msgSend)(g_rowPills[0], sel("setBackgroundColor:"), flyOn ? whiteColor : offPillBg);
-        id layer = ((id (*)(id, SEL))objc_msgSend)(g_coreBtns[0], sel("layer"));
-        if (layer && activeBorder && normalBorder) {
-            id c = ((id (*)(id, SEL))objc_msgSend)(flyOn ? activeBorder : normalBorder, sel("CGColor"));
-            ((msgSend_void_id)objc_msgSend)(layer, sel("setBorderColor:"), c);
-        }
+        flyOn = (strstr(s, "ON") != NULL || strstr(s, "STOP") != NULL);
     }
-
-    // Up & Down Buttons visual state & hold feedback (Buttons 1 & 2)
-    for (int k = 1; k <= 2; k++) {
-        if (g_coreBtns[k] && g_rowPills[k]) {
-            BOOL isPressed = (BOOL)((long (*)(id, SEL))objc_msgSend)(g_coreBtns[k], sel("isHighlighted"));
-            ((msgSend_void_id)objc_msgSend)(g_rowPills[k], sel("setBackgroundColor:"), isPressed ? activeBorder : offPillBg);
-            id layer = ((id (*)(id, SEL))objc_msgSend)(g_coreBtns[k], sel("layer"));
-            if (layer && activeBorder && normalBorder) {
-                id c = ((id (*)(id, SEL))objc_msgSend)(isPressed ? activeBorder : normalBorder, sel("CGColor"));
-                ((msgSend_void_id)objc_msgSend)(layer, sel("setBorderColor:"), c);
-            }
-            if (g_rowLabels[k]) {
-                ((msgSend_void_double)objc_msgSend)(g_rowLabels[k], sel("setAlpha:"), flyOn ? 1.0 : 0.45);
-            }
-            ((msgSend_void_double)objc_msgSend)(g_rowPills[k], sel("setAlpha:"), flyOn ? 1.0 : 0.45);
-        }
-    }
+    setSwitchState(0, flyOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
     // Aim State (Button 3)
-    if (g_coreBtns[3] && g_rowPills[3]) {
+    BOOL aimOn = NO;
+    if (g_coreBtns[3]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        BOOL on = (strstr(s, "ON") != NULL || strstr(s, "LOCK") != NULL);
-        ((msgSend_void_id)objc_msgSend)(g_rowPills[3], sel("setBackgroundColor:"), on ? whiteColor : offPillBg);
-        id layer = ((id (*)(id, SEL))objc_msgSend)(g_coreBtns[3], sel("layer"));
-        if (layer && activeBorder && normalBorder) {
-            id c = ((id (*)(id, SEL))objc_msgSend)(on ? activeBorder : normalBorder, sel("CGColor"));
-            ((msgSend_void_id)objc_msgSend)(layer, sel("setBorderColor:"), c);
-        }
+        aimOn = (strstr(s, "ON") != NULL || strstr(s, "LOCK") != NULL);
     }
+    setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
     // ESP State (Button 4)
-    if (g_coreBtns[4] && g_rowPills[4]) {
+    BOOL espOn = NO;
+    if (g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        BOOL on = (strstr(s, "ON") != NULL);
-        ((msgSend_void_id)objc_msgSend)(g_rowPills[4], sel("setBackgroundColor:"), on ? whiteColor : offPillBg);
-        id layer = ((id (*)(id, SEL))objc_msgSend)(g_coreBtns[4], sel("layer"));
-        if (layer && activeBorder && normalBorder) {
-            id c = ((id (*)(id, SEL))objc_msgSend)(on ? activeBorder : normalBorder, sel("CGColor"));
-            ((msgSend_void_id)objc_msgSend)(layer, sel("setBorderColor:"), c);
-        }
+        espOn = (strstr(s, "ON") != NULL);
     }
+    setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
     // Info button (Button 5)
     if (g_rowPills[5]) {
         ((msgSend_void_id)objc_msgSend)(g_rowPills[5], sel("setBackgroundColor:"), offPillBg);
     }
+
+    // 1 Hit Kill VIP (Button 6)
+    BOOL oneHitOn = NO;
+    Class defsCls = cls("NSUserDefaults");
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (defs) {
+            Class strCls = cls("NSString");
+            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw7");
+            if (key) {
+                oneHitOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+            }
+        }
+    }
+    setSwitchState(6, oneHitOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+    // Speed Epic VIP (Button 7)
+    BOOL speedOn = NO;
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (defs) {
+            Class strCls = cls("NSString");
+            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
+            if (key) {
+                speedOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+            }
+        }
+    }
+    setSwitchState(7, speedOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+    // No Recoil 100% VIP (Button 8)
+    BOOL recoilOn = NO;
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (defs) {
+            Class strCls = cls("NSString");
+            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw2");
+            if (key) {
+                recoilOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+            }
+        }
+    }
+    setSwitchState(8, recoilOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+    // Wallhack VIP (Button 9)
+    BOOL wallhackOn = NO;
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (defs) {
+            Class strCls = cls("NSString");
+            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw1");
+            if (key) {
+                wallhackOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+            }
+        }
+    }
+    setSwitchState(9, wallhackOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 }
 
 static void createFloatingLogoButton(id win) {
@@ -527,7 +862,7 @@ static void createFloatingLogoButton(id win) {
         }
     }
 
-    // Try loading header.png
+    // Try loading header.png (with 100% reliable embedded fallback)
     id logoImg = loadLogoImage();
     if (logoImg) {
         ((msgSend_id_id_long)objc_msgSend)(floatBtn, sel("setImage:forState:"), logoImg, 0);
@@ -544,7 +879,7 @@ static void createFloatingLogoButton(id win) {
         Class nsString = cls("NSString");
         if (uiColor && nsString) {
             id redColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
-            id txt = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "👑\nVIP");
+            id txt = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "VIP\nMOD");
             ((msgSend_id_id_long)objc_msgSend)(floatBtn, sel("setTitle:forState:"), txt, 0);
             ((msgSend_id_id_long)objc_msgSend)(floatBtn, sel("setTitleColor:forState:"), redColor, 0);
             id lbl = ((id (*)(id, SEL))objc_msgSend)(floatBtn, sel("titleLabel"));
@@ -576,7 +911,20 @@ static void createFloatingLogoButton(id win) {
     ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), floatBtn);
 
     g_floatBtn = floatBtn;
-    printf("[FlyMenuUI] Floating Logo Button (header.png) created on UIWindow\n");
+    printf("[FlyMenuUI] Floating Logo Button created on UIWindow\n");
+}
+
+static void ensureFloatingButtonOnWindow(id win) {
+    if (!win) return;
+    if (!g_floatBtn) {
+        createFloatingLogoButton(win);
+        return;
+    }
+    id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
+    if (!curSuper) {
+        ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_floatBtn);
+        ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
+    }
 }
 
 static void setupMenuUI(id win, id panel) {
@@ -616,9 +964,46 @@ static void setupMenuUI(id win, id panel) {
         }
     }
 
-    // 3. Panel Container styling (Width = 280, Height = 345)
+    // 2b. Dynamically create buttons for features from ros.dylib:
+    // 6: 1 Hit Kill VIP
+    // 7: Speed Epic VIP
+    // 8: No Recoil 100% VIP
+    // 9: Wallhack VIP
+    Class uiBtn = cls("UIButton");
+    if (uiBtn) {
+        // 6: 1 Hit Kill VIP
+        id btn1Hit = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btn1Hit) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btn1Hit, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleOneHit:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btn1Hit);
+            g_coreBtns[6] = btn1Hit;
+        }
+        // 7: Speed Epic VIP
+        id btnSpeed = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btnSpeed) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btnSpeed, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleSpeedEpic:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnSpeed);
+            g_coreBtns[7] = btnSpeed;
+        }
+        // 8: No Recoil 100% VIP
+        id btnRecoil = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btnRecoil) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btnRecoil, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleNoRecoil:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnRecoil);
+            g_coreBtns[8] = btnRecoil;
+        }
+        // 9: Wallhack VIP
+        id btnWallhack = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btnWallhack) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btnWallhack, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleWallhack:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnWallhack);
+            g_coreBtns[9] = btnWallhack;
+        }
+    }
+
+    // 3. Size and style the main panel (280 width x 516 height)
     double panelW = 280.0;
-    double panelH = 345.0;
+    double panelH = 516.0;
     CGRect pFrame = ((msgSend_rect)objc_msgSend)(panel, sel("frame"));
     pFrame.size.width = panelW;
     pFrame.size.height = panelH;
@@ -626,139 +1011,117 @@ static void setupMenuUI(id win, id panel) {
 
     Class uiColor = cls("UIColor");
     Class uiView = cls("UIView");
-    Class uiBtn = cls("UIButton");
     Class uiLabel = cls("UILabel");
     Class uiFont = cls("UIFont");
     Class nsString = cls("NSString");
 
     if (uiColor) {
-        id bgColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.05, 0.05, 0.07, 0.98);
-        if (bgColor) {
-            ((msgSend_void_id)objc_msgSend)(panel, sel("setBackgroundColor:"), bgColor);
-        }
+        id panelBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.05, 0.05, 0.07, 0.98);
+        if (panelBg) ((msgSend_void_id)objc_msgSend)(panel, sel("setBackgroundColor:"), panelBg);
+
         id pLayer = ((id (*)(id, SEL))objc_msgSend)(panel, sel("layer"));
         if (pLayer) {
             ((msgSend_void_double)objc_msgSend)(pLayer, sel("setCornerRadius:"), 16.0);
             ((msgSend_void_double)objc_msgSend)(pLayer, sel("setBorderWidth:"), 2.0);
             id redBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
             if (redBorder) {
-                id cgBorder = ((id (*)(id, SEL))objc_msgSend)(redBorder, sel("CGColor"));
-                ((msgSend_void_id)objc_msgSend)(pLayer, sel("setBorderColor:"), cgBorder);
+                id cg = ((id (*)(id, SEL))objc_msgSend)(redBorder, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(pLayer, sel("setBorderColor:"), cg);
             }
             ((msgSend_void_long)objc_msgSend)(pLayer, sel("setMasksToBounds:"), 1);
         }
     }
 
-    ((msgSend_void_long)objc_msgSend)(panel, sel("setUserInteractionEnabled:"), 1);
-
-    // Disable cancelsTouchesInView on panel gestures so hold/touch events on buttons are never canceled
-    id panelGestures = ((id (*)(id, SEL))objc_msgSend)(panel, sel("gestureRecognizers"));
-    if (panelGestures) {
-        long gCount = (long)((long (*)(id, SEL))objc_msgSend)(panelGestures, sel("count"));
-        for (long g = 0; g < gCount; g++) {
-            id gr = ((msgSend_id_long)objc_msgSend)(panelGestures, sel("objectAtIndex:"), g);
-            if (gr) {
-                ((msgSend_void_bool)objc_msgSend)(gr, sel("setCancelsTouchesInView:"), NO);
-                ((msgSend_void_bool)objc_msgSend)(gr, sel("setDelaysTouchesBegan:"), NO);
-                ((msgSend_void_bool)objc_msgSend)(gr, sel("setDelaysTouchesEnded:"), NO);
-            }
-        }
-    }
-
-    // 4. Create Red Header Bar (Matching user's reference image)
+    // 4. Create Header Bar (Height 42)
     double headerH = 42.0;
-    if (!uiView) return;
     id headerBar = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
-    if (!headerBar) return;
-
-    ((msgSend_void_rect)objc_msgSend)(headerBar, sel("setFrame:"), CGRectMake(0, 0, panelW, headerH));
-    if (uiColor) {
-        id headerRed = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
-        if (headerRed) {
-            ((msgSend_void_id)objc_msgSend)(headerBar, sel("setBackgroundColor:"), headerRed);
+    if (headerBar) {
+        ((msgSend_void_rect)objc_msgSend)(headerBar, sel("setFrame:"), CGRectMake(0, 0, panelW, headerH));
+        if (uiColor) {
+            id headerBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
+            if (headerBg) ((msgSend_void_id)objc_msgSend)(headerBar, sel("setBackgroundColor:"), headerBg);
         }
-    }
-    ((msgSend_void_long)objc_msgSend)(headerBar, sel("setUserInteractionEnabled:"), 1);
 
-    // Header Logo Icon (header.png)
-    id logoImg = loadLogoImage();
-    if (logoImg) {
-        Class uiImgView = cls("UIImageView");
-        if (uiImgView) {
-            id iconView = ((msgSend_id_id)objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiImgView, sel("alloc")), sel("initWithImage:"), logoImg);
-            if (iconView) {
-                ((msgSend_void_rect)objc_msgSend)(iconView, sel("setFrame:"), CGRectMake(10, 7, 28, 28));
-                id iconLayer = ((id (*)(id, SEL))objc_msgSend)(iconView, sel("layer"));
-                if (iconLayer) {
-                    ((msgSend_void_double)objc_msgSend)(iconLayer, sel("setCornerRadius:"), 6.0);
-                    ((msgSend_void_long)objc_msgSend)(iconLayer, sel("setMasksToBounds:"), 1);
-                }
-                ((msgSend_void_id)objc_msgSend)(headerBar, sel("addSubview:"), iconView);
-            }
-        }
-    }
-
-    // Header Title Label: "ikhozzzz vip"
-    if (uiLabel && nsString) {
-        id titleLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
-        if (titleLbl) {
-            ((msgSend_void_rect)objc_msgSend)(titleLbl, sel("setFrame:"), CGRectMake(logoImg ? 46 : 14, 0, panelW - 85, headerH));
-            id titleStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "ikhozzzz vip");
-            if (titleStr) {
-                ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setText:"), titleStr);
-            }
-            if (uiColor) {
-                id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
-                if (whiteColor) {
-                    ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setTextColor:"), whiteColor);
+        // Header Logo Icon
+        id logoImg = loadLogoImage();
+        if (logoImg) {
+            Class uiImgView = cls("UIImageView");
+            if (uiImgView) {
+                id iconView = ((msgSend_id_id)objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiImgView, sel("alloc")), sel("initWithImage:"), logoImg);
+                if (iconView) {
+                    ((msgSend_void_rect)objc_msgSend)(iconView, sel("setFrame:"), CGRectMake(10, 7, 28, 28));
+                    id iconLayer = ((id (*)(id, SEL))objc_msgSend)(iconView, sel("layer"));
+                    if (iconLayer) {
+                        ((msgSend_void_double)objc_msgSend)(iconLayer, sel("setCornerRadius:"), 6.0);
+                        ((msgSend_void_long)objc_msgSend)(iconLayer, sel("setMasksToBounds:"), 1);
+                    }
+                    ((msgSend_void_id)objc_msgSend)(headerBar, sel("addSubview:"), iconView);
                 }
             }
-            if (uiFont) {
-                id boldFont = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 14.5);
-                if (boldFont) {
-                    ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setFont:"), boldFont);
-                }
-            }
-            ((msgSend_void_id)objc_msgSend)(headerBar, sel("addSubview:"), titleLbl);
         }
-    }
 
-    // Header Close [✕] Button
-    if (uiBtn && nsString) {
-        id closeBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
-        if (closeBtn) {
-            ((msgSend_void_rect)objc_msgSend)(closeBtn, sel("setFrame:"), CGRectMake(panelW - 38, 5, 32, 32));
-            id closeStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "✕");
-            if (closeStr) {
-                ((msgSend_id_id_long)objc_msgSend)(closeBtn, sel("setTitle:forState:"), closeStr, 0);
-            }
-            if (uiColor) {
-                id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
-                if (whiteColor) {
-                    ((msgSend_id_id_long)objc_msgSend)(closeBtn, sel("setTitleColor:forState:"), whiteColor, 0);
+        // Header Title Label: "ikhozzzz vip"
+        if (uiLabel && nsString) {
+            id titleLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
+            if (titleLbl) {
+                ((msgSend_void_rect)objc_msgSend)(titleLbl, sel("setFrame:"), CGRectMake(logoImg ? 46 : 14, 0, panelW - 85, headerH));
+                id titleStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "ikhozzzz vip");
+                if (titleStr) {
+                    ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setText:"), titleStr);
                 }
-            }
-            if (uiFont) {
-                id btnFont = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 18.0);
-                if (btnFont) {
-                    id btnLbl = ((id (*)(id, SEL))objc_msgSend)(closeBtn, sel("titleLabel"));
-                    if (btnLbl) ((msgSend_void_id)objc_msgSend)(btnLbl, sel("setFont:"), btnFont);
+                if (uiColor) {
+                    id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                    if (whiteColor) {
+                        ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setTextColor:"), whiteColor);
+                    }
                 }
+                if (uiFont) {
+                    id boldFont = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 14.5);
+                    if (boldFont) {
+                        ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setFont:"), boldFont);
+                    }
+                }
+                ((msgSend_void_id)objc_msgSend)(headerBar, sel("addSubview:"), titleLbl);
             }
-            ((msgSend_void_id_sel_long)objc_msgSend)(closeBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("closeMenu:"), 1 << 6);
-            ((msgSend_void_id)objc_msgSend)(headerBar, sel("addSubview:"), closeBtn);
         }
-    }
 
-    // Header Pan Gesture
-    Class panCls = cls("UIPanGestureRecognizer");
-    if (panCls) {
-        id headerPan = ((id (*)(id, SEL, id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)panCls, sel("alloc")), sel("initWithTarget:action:"), g_uiMgr, sel("handleMenuPan:"));
-        if (headerPan) {
-            ((msgSend_void_id)objc_msgSend)(headerBar, sel("addGestureRecognizer:"), headerPan);
+        // Header Close [✕] Button
+        if (uiBtn && nsString) {
+            id closeBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+            if (closeBtn) {
+                ((msgSend_void_rect)objc_msgSend)(closeBtn, sel("setFrame:"), CGRectMake(panelW - 38, 5, 32, 32));
+                id closeStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "✕");
+                if (closeStr) {
+                    ((msgSend_id_id_long)objc_msgSend)(closeBtn, sel("setTitle:forState:"), closeStr, 0);
+                }
+                if (uiColor) {
+                    id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                    if (whiteColor) {
+                        ((msgSend_id_id_long)objc_msgSend)(closeBtn, sel("setTitleColor:forState:"), whiteColor, 0);
+                    }
+                }
+                if (uiFont) {
+                    id btnFont = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 18.0);
+                    if (btnFont) {
+                        id btnLbl = ((id (*)(id, SEL))objc_msgSend)(closeBtn, sel("titleLabel"));
+                        if (btnLbl) ((msgSend_void_id)objc_msgSend)(btnLbl, sel("setFont:"), btnFont);
+                    }
+                }
+                ((msgSend_void_id_sel_long)objc_msgSend)(closeBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("closeMenu:"), 1 << 6);
+                ((msgSend_void_id)objc_msgSend)(headerBar, sel("addSubview:"), closeBtn);
+            }
         }
+
+        // Header Pan Gesture
+        Class panCls = cls("UIPanGestureRecognizer");
+        if (panCls) {
+            id headerPan = ((id (*)(id, SEL, id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)panCls, sel("alloc")), sel("initWithTarget:action:"), g_uiMgr, sel("handleMenuPan:"));
+            if (headerPan) {
+                ((msgSend_void_id)objc_msgSend)(headerBar, sel("addGestureRecognizer:"), headerPan);
+            }
+        }
+        ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), headerBar);
     }
-    ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), headerBar);
 
     // 5. Create Navigation / Tabs Bar (Directly below header)
     id tabBar = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
@@ -769,7 +1132,7 @@ static void setupMenuUI(id win, id panel) {
             if (tabBg) ((msgSend_void_id)objc_msgSend)(tabBar, sel("setBackgroundColor:"), tabBg);
         }
 
-        const char *tabTitles[] = { "🎯 Aim", "👁 Esp", "⚡ Fly", "📇 Info" };
+        const char *tabTitles[] = { "AIM", "ESP", "FLY", "INFO" };
         double tabW = (panelW - 20) / 4.0;
         id greyColor = uiColor ? ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.65, 0.65, 0.70, 1.0) : NULL;
         id inactiveTabBg = uiColor ? ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.11, 0.11, 0.15, 1.0) : NULL;
@@ -778,23 +1141,39 @@ static void setupMenuUI(id win, id panel) {
             id tBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
             if (tBtn) {
                 ((msgSend_void_rect)objc_msgSend)(tBtn, sel("setFrame:"), CGRectMake(4 + t * (tabW + 3), 5, tabW, 26));
-                id tStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), tabTitles[t]);
-                if (tStr) ((msgSend_id_id_long)objc_msgSend)(tBtn, sel("setTitle:forState:"), tStr, 0);
-                if (greyColor) ((msgSend_id_id_long)objc_msgSend)(tBtn, sel("setTitleColor:forState:"), greyColor, 0);
                 if (inactiveTabBg) ((msgSend_void_id)objc_msgSend)(tBtn, sel("setBackgroundColor:"), inactiveTabBg);
 
-                if (uiFont) {
-                    id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 11.0);
-                    if (font) {
-                        id lbl = ((id (*)(id, SEL))objc_msgSend)(tBtn, sel("titleLabel"));
-                        if (lbl) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), font);
-                    }
-                }
                 id tLayer = ((id (*)(id, SEL))objc_msgSend)(tBtn, sel("layer"));
                 if (tLayer) {
                     ((msgSend_void_double)objc_msgSend)(tLayer, sel("setCornerRadius:"), 5.0);
                     ((msgSend_void_long)objc_msgSend)(tLayer, sel("setMasksToBounds:"), 1);
+
+                    // Add clean vector icon layer
+                    id iconLayer = createTabIconLayer(t, greyColor);
+                    if (iconLayer) {
+                        ((msgSend_void_id)objc_msgSend)(tLayer, sel("addSublayer:"), iconLayer);
+                        g_tabIcons[t] = iconLayer;
+                    }
                 }
+
+                // Add clean text label to the right of the icon
+                if (uiLabel && nsString) {
+                    id tabLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
+                    if (tabLbl) {
+                        ((msgSend_void_rect)objc_msgSend)(tabLbl, sel("setFrame:"), CGRectMake(22, 0, tabW - 24, 26));
+                        ((msgSend_void_long)objc_msgSend)(tabLbl, sel("setUserInteractionEnabled:"), 0);
+                        id tStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), tabTitles[t]);
+                        if (tStr) ((msgSend_void_id)objc_msgSend)(tabLbl, sel("setText:"), tStr);
+                        if (greyColor) ((msgSend_void_id)objc_msgSend)(tabLbl, sel("setTextColor:"), greyColor);
+                        if (uiFont) {
+                            id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 10.5);
+                            if (font) ((msgSend_void_id)objc_msgSend)(tabLbl, sel("setFont:"), font);
+                        }
+                        ((msgSend_void_id)objc_msgSend)(tBtn, sel("addSubview:"), tabLbl);
+                        g_tabLabels[t] = tabLbl;
+                    }
+                }
+
                 ((msgSend_void_long)objc_msgSend)(tBtn, sel("setTag:"), t);
                 ((msgSend_void_id_sel_long)objc_msgSend)(tBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("selectTab:"), 1 << 6);
                 ((msgSend_void_id)objc_msgSend)(tabBar, sel("addSubview:"), tBtn);
@@ -816,21 +1195,18 @@ static void setupMenuUI(id win, id panel) {
         ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), tabBar);
     }
 
-    // 6. Style the 6 native core buttons DIRECTLY with clean modern row styling
-    // Ordering:
-    // 0: Fly Hack (Zero Gravity)
-    // 1: Flight Ascend (Up)
-    // 2: Flight Descend (Down)
-    // 3: Aimbot 360 Lock
-    // 4: Esp Player Laser & Box
-    // 5: Flight Diagnostics & Info
+    // 6. Style all buttons directly with clean modern card container and toggle knob
     const char *cleanTitles[] = {
         "Fly Hack (Zero Gravity)",
         "Flight Ascend (Up)",
         "Flight Descend (Down)",
         "Aimbot 360 Lock",
         "Esp Player Laser & Box",
-        "Flight Diagnostics & Info"
+        "Flight Diagnostics & Info",
+        "1 Hit Kill VIP",
+        "Speed Epic VIP",
+        "No Recoil 100% VIP",
+        "Wallhack VIP"
     };
 
     double startY = 84.0;
@@ -841,7 +1217,7 @@ static void setupMenuUI(id win, id panel) {
         id btn = g_coreBtns[i];
         if (!btn) continue;
 
-        // Position the real core button directly as the row
+        // Position the button directly as the row card
         ((msgSend_void_rect)objc_msgSend)(btn, sel("setFrame:"), CGRectMake(10, startY + i * (rowH + gap), panelW - 20, rowH));
         ((msgSend_void_long)objc_msgSend)(btn, sel("setHidden:"), 0);
         ((msgSend_void_long)objc_msgSend)(btn, sel("setUserInteractionEnabled:"), 1);
@@ -870,7 +1246,7 @@ static void setupMenuUI(id win, id panel) {
             }
         }
 
-        // Left Toggle Switch Pill (Matches reference image)
+        // Left Toggle Switch Pill
         id pill = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
         if (pill) {
             ((msgSend_void_rect)objc_msgSend)(pill, sel("setFrame:"), CGRectMake(10, 8, 36, 22));
@@ -884,6 +1260,7 @@ static void setupMenuUI(id win, id panel) {
                     ((msgSend_void_long)objc_msgSend)(pLayer, sel("setMasksToBounds:"), 1);
                 }
             }
+
             if (i == 1 || i == 2 || i == 5) {
                 if (uiLabel && nsString) {
                     id symLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
@@ -901,6 +1278,24 @@ static void setupMenuUI(id win, id panel) {
                         }
                         ((msgSend_void_long)objc_msgSend)(symLbl, sel("setTextAlignment:"), 1); // Center
                         ((msgSend_void_id)objc_msgSend)(pill, sel("addSubview:"), symLbl);
+                    }
+                }
+            } else {
+                // Real modern sliding knob inside toggle pill
+                if (uiView && uiColor) {
+                    id knob = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
+                    if (knob) {
+                        ((msgSend_void_rect)objc_msgSend)(knob, sel("setFrame:"), CGRectMake(2, 2, 18, 18));
+                        ((msgSend_void_long)objc_msgSend)(knob, sel("setUserInteractionEnabled:"), 0);
+                        id knobColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.50, 0.55, 1.0);
+                        if (knobColor) ((msgSend_void_id)objc_msgSend)(knob, sel("setBackgroundColor:"), knobColor);
+                        id kLayer = ((id (*)(id, SEL))objc_msgSend)(knob, sel("layer"));
+                        if (kLayer) {
+                            ((msgSend_void_double)objc_msgSend)(kLayer, sel("setCornerRadius:"), 9.0);
+                            ((msgSend_void_long)objc_msgSend)(kLayer, sel("setMasksToBounds:"), 1);
+                        }
+                        ((msgSend_void_id)objc_msgSend)(pill, sel("addSubview:"), knob);
+                        g_rowKnobs[i] = knob;
                     }
                 }
             }
@@ -933,58 +1328,35 @@ static void setupMenuUI(id win, id panel) {
         ((msgSend_void_id)objc_msgSend)(panel, sel("bringSubviewToFront:"), btn);
     }
 
-    // 7. Create Floating Logo Button
-    createFloatingLogoButton(win);
+    // 7. Ensure Floating Logo Button is on the active window
+    ensureFloatingButtonOnWindow(win);
 }
 
-// Extract rich ESP snapshot string directly from ros_combat_mod in Python engine
+// Safely read rich ESP snapshot string generated by ros_combat in RAM-cached temp file
 static char *getESPSnapshot(void) {
-    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
-    int (*Py_IsInitialized)(void) = (int (*)(void))(slide + 0x101d05a24);
-    if (!Py_IsInitialized || !Py_IsInitialized()) return NULL;
-
-    void *(*PyGILState_Ensure)(void) = (void *(*)(void))(slide + 0x101d05158);
-    void (*PyGILState_Release)(void *) = (void (*)(void *))(slide + 0x101d051dc);
-    void *(*PyImport_AddModule)(const char *) = (void *(*)(const char *))(slide + 0x101cf8fd4);
-    void *(*PyModule_GetDict)(void *) = (void *(*)(void *))(slide + 0x101c79884);
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))(slide + 0x101d0689c);
-    char *(*PyString_AsString)(void *) = (char *(*)(void *))(slide + 0x101c845f4);
-    void (*PyErr_Clear)(void) = (void (*)(void))(slide + 0x101cf17f0);
-
-    if (!PyGILState_Ensure || !PyGILState_Release || !PyRun_String || !PyString_AsString) {
-        return NULL;
+    const char *candidates[3] = { NULL, NULL, NULL };
+    int count = 0;
+    const char *tmp = getenv("TMPDIR");
+    char tmpBuf[1024];
+    if (tmp && *tmp) {
+        snprintf(tmpBuf, sizeof(tmpBuf), "%s/ros_esp.dat", tmp);
+        candidates[count++] = tmpBuf;
     }
+    candidates[count++] = "/tmp/ros_esp.dat";
 
-    void *gstate = PyGILState_Ensure();
-    char *resultCopy = NULL;
-
-    void *mod = PyImport_AddModule ? PyImport_AddModule("ros_combat_mod") : NULL;
-    if (mod && PyModule_GetDict) {
-        void *dict = PyModule_GetDict(mod);
-        if (dict) {
-            void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
-            if (res) {
-                char *s = PyString_AsString(res);
-                if (s && *s) {
-                    resultCopy = strdup(s);
-                }
-                // Decrement reference count safely
-                int64_t *ref = (int64_t *)res;
-                if (--(*ref) == 0) {
-                    void **tp = (void **)*((void **)res + 1);
-                    if (tp) {
-                        void (*dealloc)(void *) = (void (*)(void *))*(tp + 6);
-                        if (dealloc) dealloc(res);
-                    }
-                }
-            } else if (PyErr_Clear) {
-                PyErr_Clear();
-            }
-        }
+    FILE *f = NULL;
+    for (int i = 0; i < count; i++) {
+        f = fopen(candidates[i], "r");
+        if (f) break;
     }
+    if (!f) return NULL;
 
-    PyGILState_Release(gstate);
-    return resultCopy;
+    char buf[8192];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    if (n == 0) return NULL;
+    buf[n] = '\0';
+    return strdup(buf);
 }
 
 static void ensureESPOverlay(id win) {
@@ -1089,21 +1461,14 @@ static void ensureESPOverlay(id win) {
         }
     }
 
-    // Ensure rootViewController's view is ALWAYS visible
-    id rvc = ((id (*)(id, SEL))objc_msgSend)(win, sel("rootViewController"));
-    if (rvc) {
-        id rvcView = ((id (*)(id, SEL))objc_msgSend)(rvc, sel("view"));
-        if (rvcView) {
-            ((msgSend_void_long)objc_msgSend)(rvcView, sel("setHidden:"), 0);
-        }
-    }
-
     // Add overlay to window, but keep panel and float button in front
     ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), overlay);
-    if (g_panel) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_panel);
-    if (g_floatBtn) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
+    id pSuper = g_panel ? ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview")) : NULL;
+    if (pSuper == win) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_panel);
+    id fSuper = g_floatBtn ? ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview")) : NULL;
+    if (fSuper == win) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
     g_espOverlay = overlay;
-    printf("[FlyMenuUI] ESP Overlay (Lines, Boxes, Names) created successfully\n");
+    printf("[FlyMenuUI] ESP Overlay created successfully\n");
 }
 
 static void updateESPOverlay(id win) {
@@ -1111,14 +1476,7 @@ static void updateESPOverlay(id win) {
     ensureESPOverlay(win);
     if (!g_espOverlay) return;
 
-    // Ensure game root view is ALWAYS visible
-    id rvc = ((id (*)(id, SEL))objc_msgSend)(win, sel("rootViewController"));
-    if (rvc) {
-        id rvcView = ((id (*)(id, SEL))objc_msgSend)(rvc, sel("view"));
-        if (rvcView) {
-            ((msgSend_void_long)objc_msgSend)(rvcView, sel("setHidden:"), 0);
-        }
-    }
+    void *pool = objc_autoreleasePoolPush();
 
     // Check if ESP is ON in core button
     BOOL espActive = NO;
@@ -1128,16 +1486,22 @@ static void updateESPOverlay(id win) {
         espActive = (strstr(s, "ON") != NULL);
     }
 
+    static BOOL wasEspActive = NO;
     if (!espActive) {
-        if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
-        if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
-        if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
-        if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
-        for (int i = 0; i < MAX_ESP_LABELS; i++) {
-            if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+        if (wasEspActive) {
+            if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
+            if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
+            if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
+            if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
+            for (int i = 0; i < MAX_ESP_LABELS; i++) {
+                if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+            }
+            wasEspActive = NO;
         }
+        objc_autoreleasePoolPop(pool);
         return;
     }
+    wasEspActive = YES;
 
     char *snapStr = getESPSnapshot();
     if (!snapStr || strlen(snapStr) == 0) {
@@ -1149,6 +1513,7 @@ static void updateESPOverlay(id win) {
             if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
         }
         if (snapStr) free(snapStr);
+        objc_autoreleasePoolPop(pool);
         return;
     }
 
@@ -1181,6 +1546,11 @@ static void updateESPOverlay(id win) {
 
         if (sscanf(token, "%d,%d,%d,%d,%d,%d,%d,%d,%63s",
                    &canShoot, &lx, &ly, &bx, &by, &bw, &bh, &dist, nameBuf) >= 9) {
+            // Restore spaces in player name if encoded
+            for (char *p = nameBuf; *p; p++) {
+                if (*p == '_') *p = ' ';
+            }
+
             double s_bx = (double)bx / 10000.0 * winW;
             double s_by = (double)by / 10000.0 * winH;
             double s_bw = (double)bw / 10000.0 * winW;
@@ -1203,7 +1573,7 @@ static void updateESPOverlay(id win) {
                 id tLayer = g_espTextLayers[labelIdx];
                 char tagStr[96];
                 snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
-                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), tagStr) : NULL;
+                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
 
                 double tagW = strlen(tagStr) * 6.5 + 14.0;
                 if (tagW < 60.0) tagW = 60.0;
@@ -1249,14 +1619,19 @@ static void updateESPOverlay(id win) {
     }
 
     free(snapStr);
+    objc_autoreleasePoolPop(pool);
 }
 
 static void timerTick_imp(id self, SEL _cmd, id timer) {
     id win = getActiveWindow();
     if (!win) return;
 
+    // 1. Ensure floating logo button is created and present on window
+    ensureFloatingButtonOnWindow(win);
+
+    // 2. Discover and hook FlyMenu_core panel across windows safely
     if (!g_panel) {
-        id p = findFlyPanel(win);
+        id p = findFlyPanel();
         if (p) {
             g_panel = p;
             setupMenuUI(win, g_panel);
@@ -1266,8 +1641,13 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
         tickCount++;
         if (tickCount % 8 == 0) {
             updateRowStates();
+        }
+        if (tickCount % 30 == 0) {
             if (g_floatBtn) {
-                ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
+                id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
+                if (fSuper) {
+                    ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
+                }
             }
         }
         updateESPOverlay(win);
@@ -1311,6 +1691,28 @@ static void initFlyMenuUI(void) {
         printf("[FlyMenuUI] Warning: core not loaded: %s\n", dlerror());
     }
 
+    // 2b. Load ros.dylib (for 1 Hit Kill & Multi-Cheat features)
+    const char *rosCandidates[] = {
+        "/Library/MobileSubstrate/DynamicLibraries/ros.dylib",
+        "/var/jb/Library/MobileSubstrate/DynamicLibraries/ros.dylib",
+        "/var/jb/usr/lib/TweakInject/ros.dylib",
+        "/usr/lib/TweakInject/ros.dylib",
+        "@executable_path/ros.dylib",
+        "ros.dylib",
+        NULL
+    };
+    void *hRos = NULL;
+    for (int i = 0; rosCandidates[i]; i++) {
+        hRos = dlopen(rosCandidates[i], RTLD_NOW | RTLD_GLOBAL);
+        if (hRos) {
+            printf("[FlyMenuUI] Loaded ros.dylib from: %s\n", rosCandidates[i]);
+            break;
+        }
+    }
+    if (!hRos) {
+        printf("[FlyMenuUI] Note: ros.dylib dlopen fallback check: %s\n", dlerror());
+    }
+
     // 3. Register ROSUIManager class dynamically
     Class superCls = cls("NSObject");
     if (!superCls) return;
@@ -1322,12 +1724,17 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("closeMenu:"), (IMP)closeMenu_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("timerTick:"), (IMP)timerTick_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("selectTab:"), (IMP)selectTab_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleOneHit:"), (IMP)toggleOneHit_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
         objc_registerClassPair(uiMgrCls);
         g_uiMgr = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiMgrCls, sel("alloc")), sel("init"));
     }
 
     // 4. Safe post-launch configuration (1.5s delay to ensure UIKit is completely ready)
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+
         id mainBundle = ((id (*)(id, SEL))objc_msgSend)((id)cls("NSBundle"), sel("mainBundle"));
         if (mainBundle) {
             id bundlePath = ((id (*)(id, SEL))objc_msgSend)(mainBundle, sel("bundlePath"));

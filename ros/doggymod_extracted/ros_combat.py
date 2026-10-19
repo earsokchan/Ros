@@ -3,8 +3,27 @@
 import sys
 import time
 import math
+import os
 
 BUILD = 'ROS-COMBAT-TEST-10'
+
+def _write_esp_file(content):
+    targets = []
+    tmp = os.environ.get('TMPDIR')
+    if tmp:
+        targets.append(os.path.join(tmp, 'ros_esp.dat'))
+    targets.append('/tmp/ros_esp.dat')
+    seen = set()
+    for path in targets:
+        if path in seen:
+            continue
+        seen.add(path)
+        try:
+            with open(path, 'w') as f:
+                f.write(content)
+        except Exception:
+            pass
+
 _fly = sys.modules.get('ros_fly_mod')
 if _fly is None:
     raise RuntimeError('The existing Fly controller must load first')
@@ -155,6 +174,7 @@ def _clear_frame():
     _frame_time = 0.0
     _target_id = None
     _fire_held = False
+    _write_esp_file('')
 
 
 def _ensure_timer():
@@ -178,6 +198,8 @@ def handle(action):
         if action == 'esp':
             _esp = not _esp
             _esp_state = 2 if _esp else 0
+            if not _esp:
+                _write_esp_file('')
         elif action == 'aim':
             _aim = not _aim
             _aim_state = 2 if _aim else 0
@@ -193,6 +215,7 @@ def handle(action):
             _ensure_timer()
         else:
             _stop_timer()
+            _write_esp_file('')
         return True
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
@@ -326,42 +349,24 @@ def _tick():
         if _esp:
             rich_items = []
             frame_items = []
-            for c in candidates[:_max_lines]:
+            for i, c in enumerate(candidates[:_max_lines]):
                 go = c[6]
                 point = c[4]
                 entity = getattr(go, 'entity', None)
                 dist_val = math.sqrt(max(0.0, c[7]))
 
                 can_shoot = False
-                try:
-                    can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
-                except Exception:
-                    pass
-
-                # Bounding box
-                feet_pos = getattr(getattr(go, 'transform', None), 'position', None)
-                proj_feet = None
-                if feet_pos is not None:
+                if i < 16:
                     try:
-                        proj_feet = _screen_point(camera, feet_pos, resolution, origin, forward)
+                        can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
                     except Exception:
-                        pass
+                        can_shoot = False
 
-                if proj_feet is not None:
-                    head_y = c[3]
-                    feet_y = proj_feet[1]
-                    raw_h = abs(feet_y - head_y)
-                    box_top = min(head_y, feet_y) - raw_h * 0.22
-                    box_bottom = max(head_y, feet_y) + raw_h * 0.05
-                    box_h = max(0.012, min(0.95, box_bottom - box_top))
-                    box_w = box_h * 0.48
-                    box_x = c[2] - box_w * 0.5
-                    box_y = box_top
-                else:
-                    box_h = max(0.015, min(0.90, 1.85 / (dist_val + 0.1) * 1.25))
-                    box_w = box_h * 0.48
-                    box_x = c[2] - box_w * 0.5
-                    box_y = c[3] - box_h * 0.25
+                # Safe perspective bounding box calculation
+                box_h = max(0.016, min(0.85, 2.0 / (dist_val + 0.5)))
+                box_w = box_h * 0.48
+                box_x = c[2] - box_w * 0.5
+                box_y = c[3] - box_h * 0.45
 
                 box_x = max(0.0, min(1.0 - box_w, box_x))
                 box_y = max(0.0, min(1.0 - box_h, box_y))
@@ -371,7 +376,7 @@ def _tick():
                             getattr(entity, 'name', None) or
                             getattr(entity, 'charName', None) or
                             getattr(go, 'name', None) or 'Enemy')
-                clean_name = str(raw_name).replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+                clean_name = str(raw_name).replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
                 if not clean_name:
                     clean_name = 'Enemy'
 
@@ -389,9 +394,11 @@ def _tick():
                 frame_items.append((c[2], c[3], bool(cs_i)))
             _rich_esp_frame = tuple(rich_items)
             _frame = tuple(frame_items)
+            _write_esp_file(';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items))
         else:
             _rich_esp_frame = ()
             _frame = ()
+            _write_esp_file('')
         _frame_time = now
     except Waiting as error:
         _waiting = str(error)
@@ -402,6 +409,7 @@ def _tick():
             _rich_esp_frame = ()
             _frame_time = 0.0
             _esp_state = 2 if _esp else 0
+            _write_esp_file('')
         _aim_state = 2 if _aim else 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
@@ -409,6 +417,7 @@ def _tick():
         _esp_state = 4 if _esp else 0
         _aim_state = 4 if _aim else 0
         _esp = _aim = False
+        _write_esp_file('')
         try:
             _stop_timer()
         except Exception:
