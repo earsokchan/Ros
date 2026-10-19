@@ -8,21 +8,7 @@ import os
 BUILD = 'ROS-COMBAT-TEST-10'
 
 def _write_esp_file(content):
-    targets = []
-    tmp = os.environ.get('TMPDIR')
-    if tmp:
-        targets.append(os.path.join(tmp, 'ros_esp.dat'))
-    targets.append('/tmp/ros_esp.dat')
-    seen = set()
-    for path in targets:
-        if path in seen:
-            continue
-        seen.add(path)
-        try:
-            with open(path, 'w') as f:
-                f.write(content)
-        except Exception:
-            pass
+    pass
 
 _fly = sys.modules.get('ros_fly_mod')
 if _fly is None:
@@ -355,8 +341,8 @@ def _tick():
                 entity = getattr(go, 'entity', None)
                 dist_val = math.sqrt(max(0.0, c[7]))
 
-                can_shoot = False
-                if i < 16:
+                can_shoot = bool(c[1] == _target_id)
+                if not can_shoot and i == 0 and _fire_held:
                     try:
                         can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
                     except Exception:
