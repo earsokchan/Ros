@@ -6,6 +6,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <unistd.h>
+#include <mach-o/dyld.h>
 
 #include "embedded_scripts.h"
 
@@ -38,6 +39,7 @@ typedef id (*msgSend_id_double4)(id, SEL, double, double, double, double);
 typedef id (*msgSend_id_double)(id, SEL, double);
 typedef void (*msgSend_void_double)(id, SEL, double);
 typedef void (*msgSend_void_rect)(id, SEL, CGRect);
+typedef id (*msgSend_id_rect)(id, SEL, CGRect);
 typedef CGRect (*msgSend_rect)(id, SEL);
 typedef CGPoint (*msgSend_pt_id)(id, SEL, id);
 typedef void (*msgSend_void_pt_id)(id, SEL, CGPoint, id);
@@ -45,6 +47,7 @@ typedef CGPoint (*msgSend_pt)(id, SEL);
 typedef void (*msgSend_void_pt)(id, SEL, CGPoint);
 typedef void (*msgSend_void_long)(id, SEL, long);
 typedef void (*msgSend_void_id)(id, SEL, id);
+typedef void (*msgSend_void_id_long)(id, SEL, id, long);
 typedef void (*msgSend_void_id_sel_long)(id, SEL, id, SEL, long);
 typedef void (*msgSend_void_ulong)(id, SEL, unsigned long);
 typedef void (*msgSend_void_bool)(id, SEL, BOOL);
@@ -61,6 +64,15 @@ static id g_rowPills[NUM_BUTTONS] = { NULL };    // Toggle switch indicators
 static id g_rowLabels[NUM_BUTTONS] = { NULL };   // Clean titles
 static id g_tabBtns[4] = { NULL };              // 0:Aim, 1:Esp, 2:Fly, 3:Info
 static int g_selectedTab = -1;                  // -1 = Show All
+
+// Rich ESP Overlay Globals
+static id g_espOverlay = NULL;
+static id g_espRedLineLayer = NULL;
+static id g_espGreenLineLayer = NULL;
+static id g_espRedBoxLayer = NULL;
+static id g_espGreenBoxLayer = NULL;
+#define MAX_ESP_LABELS 32
+static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
 
 // Helper to get app Documents path using pure Objective-C runtime
 static id getDocumentsPath(const char *filename) {
@@ -925,6 +937,320 @@ static void setupMenuUI(id win, id panel) {
     createFloatingLogoButton(win);
 }
 
+// Extract rich ESP snapshot string directly from ros_combat_mod in Python engine
+static char *getESPSnapshot(void) {
+    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    int (*Py_IsInitialized)(void) = (int (*)(void))(slide + 0x101d05a24);
+    if (!Py_IsInitialized || !Py_IsInitialized()) return NULL;
+
+    void *(*PyGILState_Ensure)(void) = (void *(*)(void))(slide + 0x101d05158);
+    void (*PyGILState_Release)(void *) = (void (*)(void *))(slide + 0x101d051dc);
+    void *(*PyImport_AddModule)(const char *) = (void *(*)(const char *))(slide + 0x101cf8fd4);
+    void *(*PyModule_GetDict)(void *) = (void *(*)(void *))(slide + 0x101c79884);
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))(slide + 0x101d0689c);
+    char *(*PyString_AsString)(void *) = (char *(*)(void *))(slide + 0x101c845f4);
+    void (*PyErr_Clear)(void) = (void (*)(void))(slide + 0x101cf17f0);
+
+    if (!PyGILState_Ensure || !PyGILState_Release || !PyRun_String || !PyString_AsString) {
+        return NULL;
+    }
+
+    void *gstate = PyGILState_Ensure();
+    char *resultCopy = NULL;
+
+    void *mod = PyImport_AddModule ? PyImport_AddModule("ros_combat_mod") : NULL;
+    if (mod && PyModule_GetDict) {
+        void *dict = PyModule_GetDict(mod);
+        if (dict) {
+            void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
+            if (res) {
+                char *s = PyString_AsString(res);
+                if (s && *s) {
+                    resultCopy = strdup(s);
+                }
+                // Decrement reference count safely
+                int64_t *ref = (int64_t *)res;
+                if (--(*ref) == 0) {
+                    void **tp = (void **)*((void **)res + 1);
+                    if (tp) {
+                        void (*dealloc)(void *) = (void (*)(void *))*(tp + 6);
+                        if (dealloc) dealloc(res);
+                    }
+                }
+            } else if (PyErr_Clear) {
+                PyErr_Clear();
+            }
+        }
+    }
+
+    PyGILState_Release(gstate);
+    return resultCopy;
+}
+
+static void ensureESPOverlay(id win) {
+    if (g_espOverlay || !win) return;
+
+    Class uiView = cls("UIView");
+    if (!uiView) return;
+    id overlay = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
+    if (!overlay) return;
+
+    CGRect bounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
+    ((msgSend_void_rect)objc_msgSend)(overlay, sel("setFrame:"), bounds);
+    ((msgSend_void_long)objc_msgSend)(overlay, sel("setUserInteractionEnabled:"), 0);
+    ((msgSend_void_long)objc_msgSend)(overlay, sel("setOpaque:"), 0);
+
+    Class uiColor = cls("UIColor");
+    if (uiColor) {
+        id clear = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("clearColor"));
+        if (clear) ((msgSend_void_id)objc_msgSend)(overlay, sel("setBackgroundColor:"), clear);
+    }
+
+    id overlayLayer = ((id (*)(id, SEL))objc_msgSend)(overlay, sel("layer"));
+    Class shapeCls = cls("CAShapeLayer");
+    Class textCls = cls("CATextLayer");
+
+    if (shapeCls && uiColor && overlayLayer) {
+        id redC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.20, 0.20, 0.90);
+        id greenC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 1.0, 0.40, 0.98);
+
+        // Red Line Layer (blocked enemies)
+        id rLine = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
+        ((msgSend_void_rect)objc_msgSend)(rLine, sel("setFrame:"), bounds);
+        if (redC) ((msgSend_void_id)objc_msgSend)(rLine, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(redC, sel("CGColor")));
+        ((msgSend_void_double)objc_msgSend)(rLine, sel("setLineWidth:"), 1.4);
+        ((msgSend_void_id)objc_msgSend)(rLine, sel("setFillColor:"), NULL);
+        ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), rLine);
+        g_espRedLineLayer = rLine;
+
+        // Green Line Layer (shootable / can shoot!)
+        id gLine = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
+        ((msgSend_void_rect)objc_msgSend)(gLine, sel("setFrame:"), bounds);
+        if (greenC) ((msgSend_void_id)objc_msgSend)(gLine, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(greenC, sel("CGColor")));
+        ((msgSend_void_double)objc_msgSend)(gLine, sel("setLineWidth:"), 1.8);
+        ((msgSend_void_id)objc_msgSend)(gLine, sel("setFillColor:"), NULL);
+        ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), gLine);
+        g_espGreenLineLayer = gLine;
+
+        // Red Box Layer (blocked enemies)
+        id rBox = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
+        ((msgSend_void_rect)objc_msgSend)(rBox, sel("setFrame:"), bounds);
+        if (redC) ((msgSend_void_id)objc_msgSend)(rBox, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(redC, sel("CGColor")));
+        ((msgSend_void_double)objc_msgSend)(rBox, sel("setLineWidth:"), 1.2);
+        ((msgSend_void_id)objc_msgSend)(rBox, sel("setFillColor:"), NULL);
+        ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), rBox);
+        g_espRedBoxLayer = rBox;
+
+        // Green Box Layer (shootable!)
+        id gBox = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
+        ((msgSend_void_rect)objc_msgSend)(gBox, sel("setFrame:"), bounds);
+        if (greenC) ((msgSend_void_id)objc_msgSend)(gBox, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(greenC, sel("CGColor")));
+        ((msgSend_void_double)objc_msgSend)(gBox, sel("setLineWidth:"), 1.6);
+        id subtleGreenFill = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 1.0, 0.40, 0.08);
+        if (subtleGreenFill) ((msgSend_void_id)objc_msgSend)(gBox, sel("setFillColor:"), ((id (*)(id, SEL))objc_msgSend)(subtleGreenFill, sel("CGColor")));
+        ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), gBox);
+        g_espGreenBoxLayer = gBox;
+    }
+
+    if (textCls && overlayLayer && uiColor) {
+        id tagBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.05, 0.05, 0.08, 0.82);
+        id whiteC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+        Class nsString = cls("NSString");
+        id alignCenter = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "center") : NULL;
+
+        Class uiScreen = cls("UIScreen");
+        double screenScale = 2.0;
+        if (uiScreen) {
+            id ms = ((id (*)(id, SEL))objc_msgSend)((id)uiScreen, sel("mainScreen"));
+            if (ms) screenScale = ((double (*)(id, SEL))objc_msgSend)(ms, sel("scale"));
+        }
+
+        Class uiFont = cls("UIFont");
+        id fontName = NULL;
+        if (uiFont) {
+            id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 10.0);
+            if (f) fontName = ((id (*)(id, SEL))objc_msgSend)(f, sel("fontName"));
+        }
+
+        for (int i = 0; i < MAX_ESP_LABELS; i++) {
+            id tLayer = ((id (*)(id, SEL))objc_msgSend)((id)textCls, sel("layer"));
+            ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 1);
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setFontSize:"), 10.0);
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setCornerRadius:"), 3.0);
+            ((msgSend_void_long)objc_msgSend)(tLayer, sel("setMasksToBounds:"), 1);
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setContentsScale:"), screenScale);
+            if (alignCenter) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setAlignmentMode:"), alignCenter);
+            if (fontName) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setFont:"), fontName);
+            if (tagBg) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBackgroundColor:"), ((id (*)(id, SEL))objc_msgSend)(tagBg, sel("CGColor")));
+            if (whiteC) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setForegroundColor:"), ((id (*)(id, SEL))objc_msgSend)(whiteC, sel("CGColor")));
+
+            ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), tLayer);
+            g_espTextLayers[i] = tLayer;
+        }
+    }
+
+    // Ensure rootViewController's view is ALWAYS visible
+    id rvc = ((id (*)(id, SEL))objc_msgSend)(win, sel("rootViewController"));
+    if (rvc) {
+        id rvcView = ((id (*)(id, SEL))objc_msgSend)(rvc, sel("view"));
+        if (rvcView) {
+            ((msgSend_void_long)objc_msgSend)(rvcView, sel("setHidden:"), 0);
+        }
+    }
+
+    // Add overlay to window, but keep panel and float button in front
+    ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), overlay);
+    if (g_panel) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_panel);
+    if (g_floatBtn) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
+    g_espOverlay = overlay;
+    printf("[FlyMenuUI] ESP Overlay (Lines, Boxes, Names) created successfully\n");
+}
+
+static void updateESPOverlay(id win) {
+    if (!win) return;
+    ensureESPOverlay(win);
+    if (!g_espOverlay) return;
+
+    // Ensure game root view is ALWAYS visible
+    id rvc = ((id (*)(id, SEL))objc_msgSend)(win, sel("rootViewController"));
+    if (rvc) {
+        id rvcView = ((id (*)(id, SEL))objc_msgSend)(rvc, sel("view"));
+        if (rvcView) {
+            ((msgSend_void_long)objc_msgSend)(rvcView, sel("setHidden:"), 0);
+        }
+    }
+
+    // Check if ESP is ON in core button
+    BOOL espActive = NO;
+    if (g_coreBtns[4]) {
+        id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
+        const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
+        espActive = (strstr(s, "ON") != NULL);
+    }
+
+    if (!espActive) {
+        if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
+        if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
+        if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
+        if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
+        for (int i = 0; i < MAX_ESP_LABELS; i++) {
+            if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+        }
+        return;
+    }
+
+    char *snapStr = getESPSnapshot();
+    if (!snapStr || strlen(snapStr) == 0) {
+        if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
+        if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
+        if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
+        if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
+        for (int i = 0; i < MAX_ESP_LABELS; i++) {
+            if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+        }
+        if (snapStr) free(snapStr);
+        return;
+    }
+
+    Class caTrans = cls("CATransaction");
+    if (caTrans) {
+        ((id (*)(id, SEL))objc_msgSend)((id)caTrans, sel("begin"));
+        ((msgSend_void_long)objc_msgSend)((id)caTrans, sel("setDisableActions:"), 1);
+    }
+
+    Class pathCls = cls("UIBezierPath");
+    id redLineP = ((id (*)(id, SEL))objc_msgSend)((id)pathCls, sel("bezierPath"));
+    id greenLineP = ((id (*)(id, SEL))objc_msgSend)((id)pathCls, sel("bezierPath"));
+    id redBoxP = ((id (*)(id, SEL))objc_msgSend)((id)pathCls, sel("bezierPath"));
+    id greenBoxP = ((id (*)(id, SEL))objc_msgSend)((id)pathCls, sel("bezierPath"));
+
+    CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
+    double winW = winBounds.size.width;
+    double winH = winBounds.size.height;
+    double startX = winW * 0.5;
+    double startY = winH * 0.94;
+
+    Class nsString = cls("NSString");
+    int labelIdx = 0;
+
+    char *savePtr = NULL;
+    char *token = strtok_r(snapStr, ";", &savePtr);
+    while (token && labelIdx < MAX_ESP_LABELS) {
+        int canShoot = 0, lx = 0, ly = 0, bx = 0, by = 0, bw = 0, bh = 0, dist = 0;
+        char nameBuf[64] = { 0 };
+
+        if (sscanf(token, "%d,%d,%d,%d,%d,%d,%d,%d,%63s",
+                   &canShoot, &lx, &ly, &bx, &by, &bw, &bh, &dist, nameBuf) >= 9) {
+            double s_bx = (double)bx / 10000.0 * winW;
+            double s_by = (double)by / 10000.0 * winH;
+            double s_bw = (double)bw / 10000.0 * winW;
+            double s_bh = (double)bh / 10000.0 * winH;
+
+            // Snapline from bottom-center to bottom of enemy box
+            id lineTarget = canShoot ? greenLineP : redLineP;
+            ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("moveToPoint:"), CGPointMake(startX, startY));
+            ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("addLineToPoint:"), CGPointMake(s_bx + s_bw * 0.5, s_by + s_bh));
+
+            // Bounding box
+            id boxTarget = canShoot ? greenBoxP : redBoxP;
+            id rectP = ((msgSend_id_rect)objc_msgSend)((id)pathCls, sel("bezierPathWithRect:"), CGRectMake(s_bx, s_by, s_bw, s_bh));
+            if (rectP) {
+                ((msgSend_void_id)objc_msgSend)(boxTarget, sel("appendPath:"), rectP);
+            }
+
+            // Name & distance badge
+            if (labelIdx < MAX_ESP_LABELS && g_espTextLayers[labelIdx]) {
+                id tLayer = g_espTextLayers[labelIdx];
+                char tagStr[96];
+                snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
+                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), tagStr) : NULL;
+
+                double tagW = strlen(tagStr) * 6.5 + 14.0;
+                if (tagW < 60.0) tagW = 60.0;
+                double tagH = 14.0;
+                double tagX = s_bx + (s_bw - tagW) * 0.5;
+                double tagY = s_by - tagH - 2.0;
+                if (tagY < 20.0) tagY = s_by + s_bh + 2.0;
+
+                ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(tagX, tagY, tagW, tagH));
+                if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
+                ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 0);
+                labelIdx++;
+            }
+        }
+        token = strtok_r(NULL, ";", &savePtr);
+    }
+
+    for (int k = labelIdx; k < MAX_ESP_LABELS; k++) {
+        if (g_espTextLayers[k]) {
+            ((msgSend_void_long)objc_msgSend)(g_espTextLayers[k], sel("setHidden:"), 1);
+        }
+    }
+
+    if (g_espRedLineLayer && redLineP) {
+        id cgP = ((id (*)(id, SEL))objc_msgSend)(redLineP, sel("CGPath"));
+        ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), cgP);
+    }
+    if (g_espGreenLineLayer && greenLineP) {
+        id cgP = ((id (*)(id, SEL))objc_msgSend)(greenLineP, sel("CGPath"));
+        ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), cgP);
+    }
+    if (g_espRedBoxLayer && redBoxP) {
+        id cgP = ((id (*)(id, SEL))objc_msgSend)(redBoxP, sel("CGPath"));
+        ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), cgP);
+    }
+    if (g_espGreenBoxLayer && greenBoxP) {
+        id cgP = ((id (*)(id, SEL))objc_msgSend)(greenBoxP, sel("CGPath"));
+        ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), cgP);
+    }
+
+    if (caTrans) {
+        ((id (*)(id, SEL))objc_msgSend)((id)caTrans, sel("commit"));
+    }
+
+    free(snapStr);
+}
+
 static void timerTick_imp(id self, SEL _cmd, id timer) {
     id win = getActiveWindow();
     if (!win) return;
@@ -936,10 +1262,15 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
             setupMenuUI(win, g_panel);
         }
     } else {
-        updateRowStates();
-        if (g_floatBtn) {
-            ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
+        static int tickCount = 0;
+        tickCount++;
+        if (tickCount % 8 == 0) {
+            updateRowStates();
+            if (g_floatBtn) {
+                ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
+            }
         }
+        updateESPOverlay(win);
     }
 }
 
@@ -1031,7 +1362,7 @@ static void initFlyMenuUI(void) {
         Class nsTimer = cls("NSTimer");
         if (!nsTimer || !g_uiMgr) return;
         id timer = ((msgSend_id_id_sel_id_bool)objc_msgSend)((id)nsTimer, sel("timerWithTimeInterval:target:selector:userInfo:repeats:"),
-                                                            (double)0.25, g_uiMgr, sel("timerTick:"), NULL, YES);
+                                                            (double)0.033, g_uiMgr, sel("timerTick:"), NULL, YES);
         if (!timer) return;
         Class nsRunLoop = cls("NSRunLoop");
         if (!nsRunLoop) return;

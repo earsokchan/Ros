@@ -20,6 +20,7 @@ _last_tick = 0.0
 _owner = None
 _target_id = None
 _frame = ()
+_rich_esp_frame = ()
 _frame_time = 0.0
 _last_error = ''
 _last_skip = ''
@@ -148,8 +149,9 @@ def _visible(Physics, RaycastHit, camera_position, point):
 
 
 def _clear_frame():
-    global _frame, _frame_time, _target_id, _fire_held
+    global _frame, _rich_esp_frame, _frame_time, _target_id, _fire_held
     _frame = ()
+    _rich_esp_frame = ()
     _frame_time = 0.0
     _target_id = None
     _fire_held = False
@@ -201,7 +203,7 @@ def handle(action):
 
 
 def _tick():
-    global _last_tick, _owner, _target_id, _frame, _frame_time
+    global _last_tick, _owner, _target_id, _frame, _rich_esp_frame, _frame_time
     global _esp_state, _aim_state, _last_error, _last_skip, _waiting, _ticks, _scanned, _skipped
     global _fire_held, _aim_writes, _last_angles, _esp, _aim
     now = time.time()
@@ -321,7 +323,75 @@ def _tick():
                         _aim_writes += 1
                         _aim_state = 5
                         _target_id = selected[1]
-        _frame = tuple((c[2], c[3], c[1] == _target_id) for c in candidates[:_max_lines]) if _esp else ()
+        if _esp:
+            rich_items = []
+            frame_items = []
+            for c in candidates[:_max_lines]:
+                go = c[6]
+                point = c[4]
+                entity = getattr(go, 'entity', None)
+                dist_val = math.sqrt(max(0.0, c[7]))
+
+                can_shoot = False
+                try:
+                    can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
+                except Exception:
+                    pass
+
+                # Bounding box
+                feet_pos = getattr(getattr(go, 'transform', None), 'position', None)
+                proj_feet = None
+                if feet_pos is not None:
+                    try:
+                        proj_feet = _screen_point(camera, feet_pos, resolution, origin, forward)
+                    except Exception:
+                        pass
+
+                if proj_feet is not None:
+                    head_y = c[3]
+                    feet_y = proj_feet[1]
+                    raw_h = abs(feet_y - head_y)
+                    box_top = min(head_y, feet_y) - raw_h * 0.22
+                    box_bottom = max(head_y, feet_y) + raw_h * 0.05
+                    box_h = max(0.012, min(0.95, box_bottom - box_top))
+                    box_w = box_h * 0.48
+                    box_x = c[2] - box_w * 0.5
+                    box_y = box_top
+                else:
+                    box_h = max(0.015, min(0.90, 1.85 / (dist_val + 0.1) * 1.25))
+                    box_w = box_h * 0.48
+                    box_x = c[2] - box_w * 0.5
+                    box_y = c[3] - box_h * 0.25
+
+                box_x = max(0.0, min(1.0 - box_w, box_x))
+                box_y = max(0.0, min(1.0 - box_h, box_y))
+
+                # Name
+                raw_name = (getattr(entity, 'roleName', None) or
+                            getattr(entity, 'name', None) or
+                            getattr(entity, 'charName', None) or
+                            getattr(go, 'name', None) or 'Enemy')
+                clean_name = str(raw_name).replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+                if not clean_name:
+                    clean_name = 'Enemy'
+
+                dist_m = int(dist_val + 0.5)
+
+                lx_i = int(c[2] * 10000.0 + 0.5)
+                ly_i = int((box_y + box_h) * 10000.0 + 0.5)
+                bx_i = int(box_x * 10000.0 + 0.5)
+                by_i = int(box_y * 10000.0 + 0.5)
+                bw_i = int(box_w * 10000.0 + 0.5)
+                bh_i = int(box_h * 10000.0 + 0.5)
+                cs_i = 1 if (can_shoot or c[1] == _target_id) else 0
+
+                rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
+                frame_items.append((c[2], c[3], bool(cs_i)))
+            _rich_esp_frame = tuple(rich_items)
+            _frame = tuple(frame_items)
+        else:
+            _rich_esp_frame = ()
+            _frame = ()
         _frame_time = now
     except Waiting as error:
         _waiting = str(error)
@@ -329,6 +399,7 @@ def _tick():
         # Preserve ESP when only aim's input/controller is unavailable.
         if _esp_state != 1:
             _frame = ()
+            _rich_esp_frame = ()
             _frame_time = 0.0
             _esp_state = 2 if _esp else 0
         _aim_state = 2 if _aim else 0
@@ -368,6 +439,22 @@ def snapshot():
         parts.extend((str(int(x * 10000.0 + 0.5)), str(int(y * 10000.0 + 0.5)),
                       '1' if locked else '0'))
     return ','.join(parts)
+
+
+def esp_snapshot():
+    global _esp_state, _aim_state, _last_error
+    if not _esp:
+        return ""
+    age = time.time() - _frame_time
+    if age < 0.0 or age > 0.35:
+        return ""
+    try:
+        parts = []
+        for item in _rich_esp_frame:
+            parts.append('%d,%d,%d,%d,%d,%d,%d,%d,%s' % item)
+        return ';'.join(parts)
+    except Exception:
+        return ""
 
 
 def diagnostics():
