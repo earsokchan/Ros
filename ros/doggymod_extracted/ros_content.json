@@ -1,0 +1,56 @@
+{
+ "files": [
+  {
+   "path": "res/character.npk",
+   "size": 539599548,
+   "sha256": "764258ed1e56382aa10794dd7cd80c8283a25eb16e412e9c8763fd1448f8cfc9"
+  },
+  {
+   "path": "res/character2.npk",
+   "size": 595567284,
+   "sha256": "1edcd4276d17ac18f9a1a0ccbf30bb434ffba6f940ab851570f8e885cbbff6b3"
+  },
+  {
+   "path": "res/dlc8k.npk",
+   "size": 502729954,
+   "sha256": "97b2ed276c2146517d0f53d2c6e1ccdd36080c67808f74a78ef8d8276a0bddff",
+   "optional": true
+  },
+  {
+   "path": "res/dlcfps.npk",
+   "size": 138349112,
+   "sha256": "f8a1ba64d212f79ebbf265c58cdb054278d19824881c7b96ac78dd0a79386942",
+   "optional": true
+  },
+  {
+   "path": "res/effect.npk",
+   "size": 546130608,
+   "sha256": "0bb853ff5d49023b1711484e8ed9b9a7c651de2d0a1b31406ac163671bc4ba05"
+  },
+  {
+   "path": "res/item.npk",
+   "size": 137836332,
+   "sha256": "20b11cd8cab20e71b4c2cfc2eeead2cd94eaf876d7755b0aeef5ada4ae14b21d"
+  },
+  {
+   "path": "res/model.npk",
+   "size": 77626916,
+   "sha256": "45a265012cfee652555d8c28a2d6e129683045f31b2803930d14ac0162497c26"
+  },
+  {
+   "path": "res/scene.npk",
+   "size": 248068104,
+   "sha256": "4c161a298f1f69b0358c7a2e36663a133d2109c1100d9345e250925337a86d52"
+  },
+  {
+   "path": "res/vehicle.npk",
+   "size": 362023784,
+   "sha256": "80331a40d08973c1cc30f3bf19bb33d6a0b84eec0bea9282a906e00f59dc4c8b"
+  },
+  {
+   "path": "res/weapon.npk",
+   "size": 188692068,
+   "sha256": "579739a76cd2e52bd01e717d091cf8c2a7dee4173cd5f8f3ac4814d4f8c931d0"
+  }
+ ]
+}
