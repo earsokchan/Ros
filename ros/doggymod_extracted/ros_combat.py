@@ -154,51 +154,33 @@ def _visible(Physics, RaycastHit, camera_position, point):
 
 def _extract_real_name(entity, go):
     if entity is None:
-        return 'Enemy'
-    # Try real role / player name fields from ROS game engine
-    for attr in ('role_name', 'roleName', 'nickname', 'nick_name', 'charName', 'char_name', 'userName', 'username', 'name'):
-        val = getattr(entity, attr, None)
-        if val:
-            s = str(val).strip()
-            low = s.lower()
-            if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low or 'entity_' in low or 'gameobject' in low or 'lod' in low or 'enemy' in low):
-                clean = s.replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
-                if clean and clean != 'None' and clean != 'null':
-                    return clean
-    # Check headBar UI
-    hb = getattr(entity, 'headBar', None) or getattr(entity, 'head_bar', None)
-    if hb:
-        for attr in ('roleName', 'role_name', 'name', 'nickname'):
-            val = getattr(hb, attr, None)
-            if val:
+        return 'Player'
+    # Try real role / player name fields from ROS game engine safely
+    for attr in ('role_name', 'roleName', 'nickname', 'nick_name', 'charName', 'char_name', 'userName', 'username'):
+        try:
+            val = getattr(entity, attr, None)
+            if val and isinstance(val, (str, unicode)):
                 s = str(val).strip()
                 low = s.lower()
-                if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low or 'entity_' in low):
+                if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low or 'entity_' in low or 'gameobject' in low or 'lod' in low or 'enemy' in low):
                     clean = s.replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
-                    if clean and clean != 'None':
+                    if clean and clean != 'None' and clean != 'null':
                         return clean
-    # Check callable getter methods
-    for m in ('getRoleName', 'get_role_name', 'getNickName', 'getName'):
-        fn = getattr(entity, m, None)
-        if callable(fn):
-            try:
-                res = fn()
-                if res:
-                    s = str(res).strip()
-                    low = s.lower()
-                    if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low):
-                        clean = s.replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
-                        if clean and clean != 'None':
-                            return clean
-            except Exception:
-                pass
+        except Exception:
+            pass
     # Avoid showing Avatar_XXX(Clone) as user name
-    raw_name = getattr(go, 'name', '') or ''
-    low_go = str(raw_name).lower()
-    if '(clone)' in low_go or 'avatar' in low_go or 'robot' in low_go:
-        return 'Player'
-    clean = str(raw_name).replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
-    return clean if clean else 'Player'
+    try:
+        raw_name = getattr(go, 'name', '') or ''
+        if raw_name and isinstance(raw_name, (str, unicode)):
+            low_go = str(raw_name).lower()
+            if '(clone)' in low_go or 'avatar' in low_go or 'robot' in low_go:
+                return 'Player'
+            clean = str(raw_name).replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+            if clean:
+                return clean
+    except Exception:
+        pass
+    return 'Player'
 
 
 def _clear_frame():
@@ -392,15 +374,15 @@ def _tick():
                         _target_id = selected[1]
         if _esp:
             rich_items = []
-            frame_items = []
             for i, c in enumerate(candidates[:_max_lines]):
                 go = c[6]
                 point = c[4]
                 entity = getattr(go, 'entity', None)
                 dist_val = math.sqrt(max(0.0, c[7]))
 
+                # can_shoot: target locked or in active crosshair view
                 can_shoot = bool(c[1] == _target_id)
-                if not can_shoot and i < 24:
+                if not can_shoot and i == 0 and c[0] <= 0.20:
                     try:
                         can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
                     except Exception:
@@ -429,9 +411,8 @@ def _tick():
                 cs_i = 1 if (can_shoot or c[1] == _target_id) else 0
 
                 rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
-                frame_items.append((c[2], c[3], bool(cs_i)))
             _rich_esp_frame = tuple(rich_items)
-            _frame = tuple(frame_items)
+            _frame = ()
             _write_esp_file(';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items))
         else:
             _rich_esp_frame = ()
@@ -497,17 +478,21 @@ def snapshot():
 def esp_snapshot():
     global _esp_state, _aim_state, _last_error
     if not _esp:
-        return ""
+        return "NONE"
     age = time.time() - _frame_time
     if age < 0.0 or age > 0.85:
-        return ""
+        return "NONE"
     try:
+        if not _rich_esp_frame:
+            return "NONE"
         parts = []
         for item in _rich_esp_frame:
             parts.append('%d,%d,%d,%d,%d,%d,%d,%d,%s' % item)
+        if not parts:
+            return "NONE"
         return ';'.join(parts)
     except Exception:
-        return ""
+        return "NONE"
 
 
 def diagnostics():

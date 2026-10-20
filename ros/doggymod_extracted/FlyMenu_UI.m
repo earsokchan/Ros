@@ -1836,18 +1836,42 @@ static void setupMenuUI(id win, id panel) {
 }
 
 // Extract rich ESP snapshot string directly from ros_combat_mod in Python engine
+// Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
 static char *getESPSnapshot(void) {
-    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
-    int (*Py_IsInitialized)(void) = (int (*)(void))(slide + 0x101d05a24);
-    if (!Py_IsInitialized || !Py_IsInitialized()) return NULL;
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    BOOL foundCore = NO;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            foundCore = YES;
+            break;
+        }
+    }
+    if (!foundCore) return NULL;
 
-    void *(*PyGILState_Ensure)(void) = (void *(*)(void))(slide + 0x101d05158);
-    void (*PyGILState_Release)(void *) = (void (*)(void *))(slide + 0x101d051dc);
-    void *(*PyImport_AddModule)(const char *) = (void *(*)(const char *))(slide + 0x101cf8fd4);
-    void *(*PyModule_GetDict)(void *) = (void *(*)(void *))(slide + 0x101c79884);
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))(slide + 0x101d0689c);
-    char *(*PyString_AsString)(void *) = (char *(*)(void *))(slide + 0x101c845f4);
-    void (*PyErr_Clear)(void) = (void (*)(void))(slide + 0x101cf17f0);
+    // Check if FlyMenu_core successfully validated the game executable and combat engine
+    uint8_t *pValidated = (uint8_t *)(coreSlide + 0xc088);
+    if (!pValidated || *pValidated != 1) return NULL;
+
+    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
+    void **pCombatDict = (void **)(coreSlide + 0xc168);
+    void **pPyRunString = (void **)(coreSlide + 0xc138);
+    void **pPyStringAsString = (void **)(coreSlide + 0xc150);
+    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
+    void **pPyGILStateRelease = (void **)(coreSlide + 0xc110);
+    void **pPyErrClear = (void **)(coreSlide + 0xc118);
+
+    if (!pCombatReady || *pCombatReady != 1 || !pCombatDict || !(*pCombatDict)) {
+        return NULL;
+    }
+
+    void *(*PyGILState_Ensure)(void) = (void *(*)(void))*pPyGILStateEnsure;
+    void (*PyGILState_Release)(void *) = (void (*)(void *))*pPyGILStateRelease;
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
+    char *(*PyString_AsString)(void *) = (char *(*)(void *))*pPyStringAsString;
+    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
 
     if (!PyGILState_Ensure || !PyGILState_Release || !PyRun_String || !PyString_AsString) {
         return NULL;
@@ -1855,28 +1879,28 @@ static char *getESPSnapshot(void) {
 
     void *gstate = PyGILState_Ensure();
     char *resultCopy = NULL;
+    void *dict = *pCombatDict;
 
-    void *mod = PyImport_AddModule ? PyImport_AddModule("ros_combat_mod") : NULL;
-    if (mod && PyModule_GetDict) {
-        void *dict = PyModule_GetDict(mod);
-        if (dict) {
-            void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
-            if (res) {
-                char *s = PyString_AsString(res);
-                if (s && *s) {
-                    resultCopy = strdup(s);
-                }
-                int64_t *ref = (int64_t *)res;
-                if (--(*ref) == 0) {
-                    void **tp = (void **)*((void **)res + 1);
-                    if (tp) {
-                        void (*dealloc)(void *) = (void (*)(void *))*(tp + 6);
-                        if (dealloc) dealloc(res);
-                    }
-                }
-            } else if (PyErr_Clear) {
-                PyErr_Clear();
+    if (dict) {
+        void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
+        if (res) {
+            char *s = PyString_AsString(res);
+            if (s && *s && strcmp(s, "NONE") != 0) {
+                resultCopy = strdup(s);
             }
+            int64_t *ref = (int64_t *)res;
+            if (*ref == 1) {
+                *ref = 0;
+                void *tp = *((void **)res + 1);
+                if (tp) {
+                    void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
+                    if (dealloc) dealloc(res);
+                }
+            } else if (*ref > 1) {
+                (*ref)--;
+            }
+        } else if (PyErr_Clear) {
+            PyErr_Clear();
         }
     }
 
@@ -2079,7 +2103,7 @@ static void updateESPOverlay(id win) {
                 id tLayer = g_espTextLayers[labelIdx];
                 char tagStr[96];
                 snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
-                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), tagStr) : NULL;
+                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
 
                 double tagW = strlen(tagStr) * 6.5 + 14.0;
                 if (tagW < 60.0) tagW = 60.0;
