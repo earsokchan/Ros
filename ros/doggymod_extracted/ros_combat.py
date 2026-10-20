@@ -320,7 +320,7 @@ def _tick():
                 # A despawning or not-yet-rendered object cannot become a target.
                 _skipped += 1
                 _last_skip = '%s: %s' % (type(error).__name__, error)
-        candidates.sort(key=lambda item: (item[0], item[7], item[1]))
+        candidates.sort(key=lambda item: (item[7], item[0], item[1]))
         _esp_state = 1 if _esp else 0
         _aim_state = 1 if _aim else 0
         _waiting = ''
@@ -344,20 +344,27 @@ def _tick():
             if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
                 _aim_state = 3
                 _fire_held = False
-            if _fire_held:
+            if not _fire_held:
+                _target_id = None
+            else:
                 control = camera.GetComponent('PlayerCameraController')
                 # CPlayerCameraController._onRotateCamera is an empty routine;
                 # fail explicitly rather than claiming a lock on that backend.
                 if (control is None or not callable(getattr(control, 'onRotateCamera', None))
                         or getattr(control, 'controller', None) is not None):
                     raise Waiting('Unsupported live camera controller')
+                # Prioritize closest enemy to player character (20m before 100m)
                 pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
                 retained = [c for c in candidates if c[1] == _clear_previous_target
                             and c[0] <= _retain_degrees and not c[8]]
                 if retained:
-                    pool = retained + [c for c in pool if c[1] != retained[0][1]]
-                # Visibility is recomputed while firing; a wall immediately drops lock.
-                for candidate in pool[:8]:
+                    # If another enemy is much closer than the retained target, switch to the closer threat
+                    if pool and pool[0][7] < retained[0][7] * 0.5:
+                        pass
+                    else:
+                        pool = retained + [c for c in pool if c[1] != retained[0][1]]
+                # Visibility is recomputed while firing; pick closest visible enemy
+                for candidate in pool[:12]:
                     if _visible(Physics, RaycastHit, camera_position, candidate[4]):
                         selected = candidate
                         break
@@ -369,6 +376,7 @@ def _tick():
                         raise Waiting('Local character changed')
                     if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False):
                         selected = None
+                        _target_id = None
                     else:
                         yaw, pitch = _angle_offset(selected[5], forward)
                         _last_angles = (yaw, pitch)
@@ -385,9 +393,9 @@ def _tick():
                 entity = getattr(go, 'entity', None)
                 dist_val = math.sqrt(max(0.0, c[7]))
 
-                # can_shoot: target locked or in active crosshair view
+                # can_shoot: target locked or in active crosshair view / closest visible
                 can_shoot = bool(c[1] == _target_id)
-                if not can_shoot and i == 0 and c[0] <= 0.20:
+                if not can_shoot and (c[0] <= 12.0 or i == 0):
                     try:
                         can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
                     except Exception:
