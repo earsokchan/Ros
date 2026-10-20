@@ -168,9 +168,6 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
     if (docPathObj) {
         const char *cPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
         if (cPath) {
-            if (access(cPath, R_OK) == 0) {
-                return docPathObj;
-            }
             FILE *f = fopen(cPath, "wb");
             if (f) {
                 fwrite(data, 1, len, f);
@@ -1237,7 +1234,7 @@ static void updateRowStates(void) {
         if (g_coreBtns[4]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            espOn = (strstr(s, "ON") != NULL);
+            espOn = (strstr(s, "ON") != NULL || strstr(s, "WAIT") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL));
         }
         setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1837,51 +1834,69 @@ static void setupMenuUI(id win, id panel) {
 
 // Extract rich ESP snapshot string directly from ros_combat_mod in Python engine
 // Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
+// Extract rich ESP snapshot string safely from Python engine with fallback support
 static char *getESPSnapshot(void) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    BOOL foundCore = NO;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            foundCore = YES;
-            break;
+    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
+    int (*Py_IsInitialized)(void) = (int (*)(void))(slide + 0x101d05a24);
+
+    void *(*PyGILState_Ensure)(void) = (void *(*)(void))(slide + 0x101d05158);
+    void (*PyGILState_Release)(void *) = (void (*)(void *))(slide + 0x101d051dc);
+    void *(*PyImport_AddModule)(const char *) = (void *(*)(const char *))(slide + 0x101cf8fd4);
+    void *(*PyModule_GetDict)(void *) = (void *(*)(void *))(slide + 0x101c79884);
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))(slide + 0x101d0689c);
+    char *(*PyString_AsString)(void *) = (char *(*)(void *))(slide + 0x101c845f4);
+    void (*PyErr_Clear)(void) = (void (*)(void))(slide + 0x101cf17f0);
+
+    // Fallback pointers from FlyMenu_core.dylib memory if main slide is different
+    if (!Py_IsInitialized || !Py_IsInitialized()) {
+        uint32_t count = _dyld_image_count();
+        for (uint32_t i = 0; i < count; i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name && strstr(name, "FlyMenu_core")) {
+                intptr_t coreSlide = _dyld_get_image_vmaddr_slide(i);
+                void **pPyInit = (void **)(coreSlide + 0xc0d8);
+                if (pPyInit && *pPyInit) {
+                    Py_IsInitialized = (int (*)(void))*pPyInit;
+                    PyGILState_Ensure = (void *(*)(void))*(void **)(coreSlide + 0xc0f0);
+                    PyGILState_Release = (void (*)(void *))*(void **)(coreSlide + 0xc110);
+                    PyImport_AddModule = (void *(*)(const char *))*(void **)(coreSlide + 0xc0f8);
+                    PyModule_GetDict = (void *(*)(void *))*(void **)(coreSlide + 0xc100);
+                    PyRun_String = (void *(*)(const char *, int, void *, void *))*(void **)(coreSlide + 0xc138);
+                    PyString_AsString = (char *(*)(void *))*(void **)(coreSlide + 0xc150);
+                    PyErr_Clear = (void (*)(void))*(void **)(coreSlide + 0xc118);
+                }
+                break;
+            }
         }
     }
-    if (!foundCore) return NULL;
 
-    // Check if FlyMenu_core successfully validated the game executable and combat engine
-    uint8_t *pValidated = (uint8_t *)(coreSlide + 0xc088);
-    if (!pValidated || *pValidated != 1) return NULL;
-
-    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
-    void **pCombatDict = (void **)(coreSlide + 0xc168);
-    void **pPyRunString = (void **)(coreSlide + 0xc138);
-    void **pPyStringAsString = (void **)(coreSlide + 0xc150);
-    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
-    void **pPyGILStateRelease = (void **)(coreSlide + 0xc110);
-    void **pPyErrClear = (void **)(coreSlide + 0xc118);
-
-    if (!pCombatReady || *pCombatReady != 1 || !pCombatDict || !(*pCombatDict)) {
-        return NULL;
-    }
-
-    void *(*PyGILState_Ensure)(void) = (void *(*)(void))*pPyGILStateEnsure;
-    void (*PyGILState_Release)(void *) = (void (*)(void *))*pPyGILStateRelease;
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
-    char *(*PyString_AsString)(void *) = (char *(*)(void *))*pPyStringAsString;
-    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
-
-    if (!PyGILState_Ensure || !PyGILState_Release || !PyRun_String || !PyString_AsString) {
-        return NULL;
-    }
+    if (!Py_IsInitialized || !Py_IsInitialized()) return NULL;
+    if (!PyGILState_Ensure || !PyGILState_Release || !PyRun_String || !PyString_AsString) return NULL;
 
     void *gstate = PyGILState_Ensure();
     char *resultCopy = NULL;
-    void *dict = *pCombatDict;
+
+    void *mod = PyImport_AddModule ? PyImport_AddModule("ros_combat_mod") : NULL;
+    void *dict = (mod && PyModule_GetDict) ? PyModule_GetDict(mod) : NULL;
+
+    if (!dict) {
+        // Fallback: check dict pointer directly from FlyMenu_core memory
+        uint32_t count = _dyld_image_count();
+        for (uint32_t i = 0; i < count; i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name && strstr(name, "FlyMenu_core")) {
+                intptr_t coreSlide = _dyld_get_image_vmaddr_slide(i);
+                void **pCombatDict = (void **)(coreSlide + 0xc168);
+                if (pCombatDict && *pCombatDict) {
+                    dict = *pCombatDict;
+                }
+                break;
+            }
+        }
+    }
 
     if (dict) {
+        // 1. First try rich esp_snapshot()
         void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
         if (res) {
             char *s = PyString_AsString(res);
@@ -1901,6 +1916,30 @@ static char *getESPSnapshot(void) {
             }
         } else if (PyErr_Clear) {
             PyErr_Clear();
+        }
+
+        // 2. Fallback to standard snapshot() if esp_snapshot was empty or pending
+        if (!resultCopy) {
+            void *res2 = PyRun_String("snapshot()", 258 /* Py_eval_input */, dict, dict);
+            if (res2) {
+                char *s2 = PyString_AsString(res2);
+                if (s2 && *s2 && strcmp(s2, "NONE") != 0) {
+                    resultCopy = strdup(s2);
+                }
+                int64_t *ref2 = (int64_t *)res2;
+                if (*ref2 == 1) {
+                    *ref2 = 0;
+                    void *tp2 = *((void **)res2 + 1);
+                    if (tp2) {
+                        void (*dealloc)(void *) = *(void **)((uintptr_t)tp2 + 0x30);
+                        if (dealloc) dealloc(res2);
+                    }
+                } else if (*ref2 > 1) {
+                    (*ref2)--;
+                }
+            } else if (PyErr_Clear) {
+                PyErr_Clear();
+            }
         }
     }
 
@@ -2019,12 +2058,12 @@ static void updateESPOverlay(id win) {
     ensureESPOverlay(win);
     if (!g_espOverlay) return;
 
-    // Check if ESP is ON in core button
+    // Check if ESP is ON in core button (handling ON, WAIT, or any active non-OFF state)
     BOOL espActive = NO;
     if (g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        espActive = (strstr(s, "ON") != NULL);
+        espActive = (strstr(s, "ON") != NULL || strstr(s, "WAIT") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL));
     }
 
     if (!espActive) {
@@ -2039,7 +2078,7 @@ static void updateESPOverlay(id win) {
     }
 
     char *snapStr = getESPSnapshot();
-    if (!snapStr || strlen(snapStr) == 0) {
+    if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
         if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
         if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
         if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -2072,53 +2111,97 @@ static void updateESPOverlay(id win) {
     Class nsString = cls("NSString");
     int labelIdx = 0;
 
-    char *savePtr = NULL;
-    char *token = strtok_r(snapStr, ";", &savePtr);
-    while (token && labelIdx < MAX_ESP_LABELS) {
-        int canShoot = 0, lx = 0, ly = 0, bx = 0, by = 0, bw = 0, bh = 0, dist = 0;
-        char nameBuf[64] = { 0 };
+    if (strchr(snapStr, ';') != NULL) {
+        // Rich ESP format: canShoot,lx,ly,bx,by,bw,bh,dist,name;...
+        char *savePtr = NULL;
+        char *token = strtok_r(snapStr, ";", &savePtr);
+        while (token && labelIdx < MAX_ESP_LABELS) {
+            int canShoot = 0, lx = 0, ly = 0, bx = 0, by = 0, bw = 0, bh = 0, dist = 0;
+            char nameBuf[64] = { 0 };
 
-        if (sscanf(token, "%d,%d,%d,%d,%d,%d,%d,%d,%63s",
-                   &canShoot, &lx, &ly, &bx, &by, &bw, &bh, &dist, nameBuf) >= 9) {
-            double s_bx = (double)bx / 10000.0 * winW;
-            double s_by = (double)by / 10000.0 * winH;
-            double s_bw = (double)bw / 10000.0 * winW;
-            double s_bh = (double)bh / 10000.0 * winH;
+            if (sscanf(token, "%d,%d,%d,%d,%d,%d,%d,%d,%63s",
+                       &canShoot, &lx, &ly, &bx, &by, &bw, &bh, &dist, nameBuf) >= 9) {
+                double s_bx = (double)bx / 10000.0 * winW;
+                double s_by = (double)by / 10000.0 * winH;
+                double s_bw = (double)bw / 10000.0 * winW;
+                double s_bh = (double)bh / 10000.0 * winH;
 
-            // Snapline from top-center to top of enemy bounding box
-            // Green when enemy is visible/can shoot, Red when occluded
-            id lineTarget = canShoot ? greenLineP : redLineP;
+                // Snapline from top-center to top of enemy bounding box
+                id lineTarget = canShoot ? greenLineP : redLineP;
+                ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("moveToPoint:"), CGPointMake(startX, startY));
+                ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("addLineToPoint:"), CGPointMake(s_bx + s_bw * 0.5, s_by));
+
+                // Bounding box
+                id boxTarget = canShoot ? greenBoxP : redBoxP;
+                id rectP = ((msgSend_id_rect)objc_msgSend)((id)pathCls, sel("bezierPathWithRect:"), CGRectMake(s_bx, s_by, s_bw, s_bh));
+                if (rectP) {
+                    ((msgSend_void_id)objc_msgSend)(boxTarget, sel("appendPath:"), rectP);
+                }
+
+                // Real Name & distance badge
+                if (labelIdx < MAX_ESP_LABELS && g_espTextLayers[labelIdx]) {
+                    id tLayer = g_espTextLayers[labelIdx];
+                    char tagStr[96];
+                    snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
+                    id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
+
+                    double tagW = strlen(tagStr) * 6.5 + 14.0;
+                    if (tagW < 60.0) tagW = 60.0;
+                    double tagH = 14.0;
+                    double tagX = s_bx + (s_bw - tagW) * 0.5;
+                    double tagY = s_by - tagH - 2.0;
+                    if (tagY < 20.0) tagY = s_by + s_bh + 2.0;
+
+                    ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(tagX, tagY, tagW, tagH));
+                    if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
+                    ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 0);
+                    labelIdx++;
+                }
+            }
+            token = strtok_r(NULL, ";", &savePtr);
+        }
+    } else if (strncmp(snapStr, "10,", 3) == 0) {
+        // Standard snapshot format fallback: 10,esp_state,aim_state,count,x1,y1,locked1,...
+        char *savePtr = NULL;
+        char *token = strtok_r(snapStr, ",", &savePtr); // "10"
+        if (token) token = strtok_r(NULL, ",", &savePtr); // esp_state
+        if (token) token = strtok_r(NULL, ",", &savePtr); // aim_state
+        if (token) token = strtok_r(NULL, ",", &savePtr); // count
+        int countVal = token ? atoi(token) : 0;
+        for (int k = 0; k < countVal && labelIdx < MAX_ESP_LABELS; k++) {
+            char *xTok = strtok_r(NULL, ",", &savePtr);
+            char *yTok = strtok_r(NULL, ",", &savePtr);
+            char *lockTok = strtok_r(NULL, ",", &savePtr);
+            if (!xTok || !yTok || !lockTok) break;
+            int x_i = atoi(xTok);
+            int y_i = atoi(yTok);
+            int locked = atoi(lockTok);
+
+            double s_x = (double)x_i / 10000.0 * winW;
+            double s_y = (double)y_i / 10000.0 * winH;
+            double boxH = 44.0;
+            double boxW = 22.0;
+
+            id lineTarget = locked ? greenLineP : redLineP;
             ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("moveToPoint:"), CGPointMake(startX, startY));
-            ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("addLineToPoint:"), CGPointMake(s_bx + s_bw * 0.5, s_by));
+            ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("addLineToPoint:"), CGPointMake(s_x, s_y));
 
-            // Bounding box
-            id boxTarget = canShoot ? greenBoxP : redBoxP;
-            id rectP = ((msgSend_id_rect)objc_msgSend)((id)pathCls, sel("bezierPathWithRect:"), CGRectMake(s_bx, s_by, s_bw, s_bh));
+            id boxTarget = locked ? greenBoxP : redBoxP;
+            id rectP = ((msgSend_id_rect)objc_msgSend)((id)pathCls, sel("bezierPathWithRect:"), CGRectMake(s_x - boxW * 0.5, s_y - boxH * 0.5, boxW, boxH));
             if (rectP) {
                 ((msgSend_void_id)objc_msgSend)(boxTarget, sel("appendPath:"), rectP);
             }
 
-            // Real Name & distance badge
             if (labelIdx < MAX_ESP_LABELS && g_espTextLayers[labelIdx]) {
                 id tLayer = g_espTextLayers[labelIdx];
-                char tagStr[96];
-                snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
+                const char *tagStr = locked ? "Enemy [Locked]" : "Enemy";
                 id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
-
-                double tagW = strlen(tagStr) * 6.5 + 14.0;
-                if (tagW < 60.0) tagW = 60.0;
-                double tagH = 14.0;
-                double tagX = s_bx + (s_bw - tagW) * 0.5;
-                double tagY = s_by - tagH - 2.0;
-                if (tagY < 20.0) tagY = s_by + s_bh + 2.0;
-
-                ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(tagX, tagY, tagW, tagH));
+                ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(s_x - 30.0, s_y - boxH * 0.5 - 16.0, 60.0, 14.0));
                 if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
                 ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 0);
                 labelIdx++;
             }
         }
-        token = strtok_r(NULL, ";", &savePtr);
     }
 
     for (int k = labelIdx; k < MAX_ESP_LABELS; k++) {

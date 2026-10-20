@@ -412,7 +412,7 @@ def _tick():
 
                 rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
             _rich_esp_frame = tuple(rich_items)
-            _frame = ()
+            _frame = tuple((c[2], c[3], bool(cs_i)) for c in candidates[:_max_lines])
             _write_esp_file(';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items))
         else:
             _rich_esp_frame = ()
