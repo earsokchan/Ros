@@ -148,10 +148,27 @@ def _enemy(go, player, service):
         local = getattr(player, 'entity', None)
         if entity is None or local is None or entity.id == local.id:
             return False
-        if not (service.isAvatar(entity) or service.isRobot(entity)):
+        try:
+            is_avatar = bool(service.isAvatar(entity))
+        except Exception:
+            is_avatar = False
+        try:
+            is_robot = bool(service.isRobot(entity))
+        except Exception:
+            is_robot = False
+        if not (is_avatar or is_robot):
             return False
-        if getattr(entity, 'campType', None) == getattr(local, 'campType', None) or (callable(getattr(local, 'isBattleMate', None)) and local.isBattleMate(entity.id)):
+        # Do not compare campType if either is None (solo, bot match, deathmatch)
+        camp_e = getattr(entity, 'campType', None)
+        camp_l = getattr(local, 'campType', None)
+        if camp_e is not None and camp_l is not None and camp_e == camp_l:
             return False
+        if callable(getattr(local, 'isBattleMate', None)):
+            try:
+                if local.isBattleMate(entity.id):
+                    return False
+            except Exception:
+                pass
         if getattr(entity, 'deadInGame', False):
             return False
         try:
@@ -166,120 +183,67 @@ def _enemy(go, player, service):
 
 def _is_using_gun(player, local_entity):
     """
-    Returns True only if the player is holding/using a firearm (Rifle, SMG, Sniper, Shotgun, Pistol).
-    Returns False if bare hands / fists, holstered weapon, melee (pan, crowbar), or throwables (grenades).
+    Returns False ONLY if definitely unarmed (bare fists), holding melee (pan),
+    or holding throwables (grenades).
+    Defaults to True so Aim Smooth reliably locks onto enemies when using guns.
     """
     try:
         if local_entity is None and player is None:
-            return False
+            return True
 
-        # 1. Check if entity is currently holding ANY weapon via NeoX boolean methods
-        for fn_name in ('is_holding_weapon', 'isHoldingWeapon', 'is_hold_weapon', 'isHoldWeapon'):
-            fn = getattr(local_entity, fn_name, None)
-            if callable(fn):
-                try:
-                    if not bool(fn()):
-                        return False
-                except Exception:
-                    pass
-
-        # 2. Check bag / equip slot if available
-        # In ROS NeoX: 0=unarmed/bare hands, 1=primary 1, 2=primary 2, 3=pistol, 4=melee, 5=grenade
-        bag = getattr(local_entity, 'bag', None)
-        if bag is not None:
-            for slot_attr in ('cur_equip_pos', 'curEquipPos', 'cur_pos', 'curPos', 'cur_weapon_pos'):
-                pos = getattr(bag, slot_attr, None)
-                if pos is not None:
-                    try:
-                        pos_int = int(pos)
-                        if pos_int == 0:
-                            # Unarmed or running with empty hands
-                            return False
-                        if pos_int in (4, 5):
-                            # Melee weapon (pan/crowbar) or throwable (grenade)
-                            return False
-                        if pos_int in (1, 2, 3):
-                            # Primary firearm or handgun
-                            return True
-                    except Exception:
-                        pass
-
-        # 3. Check active weapon instance on local_entity or player
-        weapon = None
         for obj in (local_entity, player):
             if obj is None:
                 continue
-            for w_name in ('cur_weapon', 'curWeapon', 'weapon', 'current_weapon', 'hold_weapon', 'holdWeapon'):
-                w = getattr(obj, w_name, None)
-                if w is not None:
-                    weapon = w
-                    break
-            if weapon is not None:
-                break
-            for fn_name in ('get_cur_weapon', 'getCurWeapon', 'get_weapon', 'getWeapon', 'get_hold_weapon'):
-                fn = getattr(obj, fn_name, None)
-                if callable(fn):
-                    try:
-                        w = fn()
-                        if w:
-                            weapon = w
-                            break
-                    except Exception:
-                        pass
-            if weapon is not None:
-                break
 
-        # 4. If a weapon object exists, inspect whether it's a gun or melee/unarmed
-        if weapon is not None:
-            # Check explicit is_gun flag / method
-            for gun_attr in ('is_gun', 'isGun', 'is_firearm', 'isFirearm'):
-                g_val = getattr(weapon, gun_attr, None)
-                if g_val is not None:
+            # 1. Explicit unarmed / fist boolean indicators
+            for attr in ('is_unarmed', 'isUnarmed', 'is_fist', 'isFist', 'bare_hand', 'bareHand'):
+                val = getattr(obj, attr, None)
+                if val is not None:
                     try:
-                        return bool(g_val() if callable(g_val) else g_val)
-                    except Exception:
-                        pass
-
-            # Check for melee or throwable flags
-            for melee_attr in ('is_melee', 'isMelee', 'is_throwable', 'isThrowable'):
-                m_val = getattr(weapon, melee_attr, None)
-                if m_val is not None:
-                    try:
-                        if bool(m_val() if callable(m_val) else m_val):
+                        res = bool(val() if callable(val) else val)
+                        if res:
                             return False
                     except Exception:
                         pass
 
-            # Check weapon name string for fists, melee, or grenades
-            w_name_str = str(getattr(weapon, 'name', '') or getattr(weapon, 'weapon_name', '') or getattr(weapon, 'desc', '') or '').lower()
-            if w_name_str:
-                if any(k in w_name_str for k in ('fist', 'bare', 'unarm', 'hand', 'melee', 'pan', 'crowbar', 'chicken', 'stick', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
-                    return False
+            # 2. Check active weapon instance or weapon name
+            for w_attr in ('cur_weapon', 'curWeapon', 'weapon', 'current_weapon', 'hold_weapon', 'holdWeapon'):
+                w = getattr(obj, w_attr, None)
+                if w is not None:
+                    if callable(w):
+                        try:
+                            w = w()
+                        except Exception:
+                            w = None
+                    if w is None:
+                        continue
+                    w_name = str(getattr(w, 'name', '') or getattr(w, 'weapon_name', '') or getattr(w, 'desc', '') or '').lower()
+                    if w_name:
+                        if any(term in w_name for term in ('fist', 'bare', 'unarm', 'hand', 'melee', 'pan', 'crowbar', 'chicken', 'stick', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
+                            return False
+                        return True
+                    # Check bullet attributes - guns have bullets
+                    for b_attr in ('bullet_count', 'clip_bullet', 'cur_bullet', 'max_bullet', 'magazine', 'ammo'):
+                        if hasattr(w, b_attr):
+                            return True
 
-            # Check bullet/ammo attributes - only firearms have magazine, clip, or bullet counts
-            for bullet_attr in ('bullet_count', 'bulletCount', 'clip_bullet', 'clipBullet', 'cur_bullet', 'curBullet', 'max_bullet', 'maxBullet', 'magazine', 'ammo_count', 'ammoCount'):
-                if hasattr(weapon, bullet_attr):
-                    return True
+            # 3. Check equip slot from bag / inventory:
+            for bag_attr in ('bag', 'inventory', 'bag_comp', 'weapon_mgr'):
+                bag = getattr(obj, bag_attr, None)
+                if bag is not None:
+                    for slot_attr in ('cur_equip_pos', 'curEquipPos', 'cur_pos', 'curPos', 'cur_weapon_pos', 'cur_slot'):
+                        pos = getattr(bag, slot_attr, None)
+                        if pos is not None:
+                            try:
+                                pos_int = int(pos)
+                                if pos_int in (4, 5):  # Melee (pan) or grenade in ROS
+                                    return False
+                            except Exception:
+                                pass
 
-            # If weapon is an object and not melee/throwable, assume gun
-            return True
-
-        # 5. Check weapon ID on local_entity
-        for id_attr in ('cur_weapon_id', 'curWeaponId', 'weapon_id', 'weaponId'):
-            wid = getattr(local_entity, id_attr, None)
-            if wid is not None:
-                try:
-                    wid_val = int(wid)
-                    if wid_val <= 0:
-                        return False
-                    return True
-                except Exception:
-                    pass
-
-        # If we reached here without any weapon detected, the player is not holding a gun
-        return False
+        return True
     except Exception:
-        return False
+        return True
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
@@ -477,15 +441,22 @@ def _tick():
                 x = projected[0] if projected is not None else -1.0
                 y = projected[1] if projected is not None else -1.0
                 entity = go.entity
+                is_inv = getattr(entity, 'invincible', False)
+                if callable(is_inv):
+                    try:
+                        is_inv = is_inv()
+                    except Exception:
+                        is_inv = False
+                is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
                 candidates.append((angle, entity.id, x, y, point, direction,
-                                   go, distance2, bool(getattr(entity, 'invincible', False)), projected is not None))
+                                   go, distance2, is_inv, projected is not None))
             except Exception as error:
                 # A despawning or not-yet-rendered object cannot become a target.
                 _skipped += 1
                 _last_skip = '%s: %s' % (type(error).__name__, error)
         candidates.sort(key=lambda item: (item[7], item[0], item[1]))
         _esp_state = 1 if _esp else 0
-        _aim_state = 1 if _aim else 0
+        _aim_state = 1 if (_aim or _aim_smooth) else 0
         _waiting = ''
         esp_candidates = [c for c in candidates if c[9]]
         if _esp:
@@ -541,21 +512,19 @@ def _tick():
         selected = None
         if _aim or _aim_smooth:
             try:
-                input_go = getattr(Globals, 'userInput', None)
-                if input_go is None:
-                    raise Waiting('Waiting for Globals.userInput')
-                get_component = getattr(input_go, 'GetComponent', None)
-                if not callable(get_component):
-                    raise Waiting('Live UserInput GameObject has no GetComponent')
-                input_component = get_component('InputInterpred')
-                if input_component is None:
-                    raise Waiting('Waiting for InputInterpred component')
-                if not hasattr(input_component, '_isFireBtnDwn'):
-                    raise Waiting('Live input has no _isFireBtnDwn')
-                _fire_held = bool(input_component._isFireBtnDwn)
-                if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
-                    _aim_state = 3
+                # Safely probe fire button without aborting if userInput component is not ready
+                _fire_held = False
+                try:
+                    input_go = getattr(Globals, 'userInput', None)
+                    if input_go is not None:
+                        get_component = getattr(input_go, 'GetComponent', None)
+                        if callable(get_component):
+                            input_component = get_component('InputInterpred')
+                            if input_component is not None and hasattr(input_component, '_isFireBtnDwn'):
+                                _fire_held = bool(input_component._isFireBtnDwn)
+                except Exception:
                     _fire_held = False
+
                 # Aim Smooth auto-aims only when player is holding a firearm (gun)!
                 # If user has no gun (bare hands / fists / melee / throwables / running unholstered), do not aimsmooth.
                 using_gun = _is_using_gun(player, local_entity)
@@ -598,43 +567,42 @@ def _tick():
                         latest_player = getattr(Globals, 'player', None)
                         if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
                             raise Waiting('Local character changed')
-                        if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False):
+                        is_inv = getattr(selected[6].entity, 'invincible', False)
+                        if callable(is_inv):
+                            try:
+                                is_inv = is_inv()
+                            except Exception:
+                                is_inv = False
+                        is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
+                        if not _enemy(selected[6], player, service) or is_inv:
                             selected = None
                             _target_id = None
                         else:
                             yaw, pitch = _angle_offset(selected[5], forward)
-                            abs_yaw = abs(yaw)
-                            abs_pitch = abs(pitch)
                             if _aim_smooth and using_gun and not _fire_held:
-                                # Fast, responsive Aim Smooth: quick snap & smooth tracking without lag/delay
-                                if abs_yaw <= 2.5 and abs_pitch <= 2.0:
+                                # 100% Auto Aim Smooth: quick, smooth lock and steady tracking onto target
+                                factor = 0.65
+                                max_step_yaw = 36.0
+                                max_step_pitch = 24.0
+                                smooth_yaw = max(-max_step_yaw, min(max_step_yaw, yaw * factor))
+                                smooth_pitch = max(-max_step_pitch, min(max_step_pitch, pitch * factor))
+                                if abs(yaw) <= 1.8:
                                     smooth_yaw = yaw
+                                if abs(pitch) <= 1.4:
                                     smooth_pitch = pitch
-                                else:
-                                    step_yaw = max(4.0, min(38.0, abs_yaw * 0.70))
-                                    step_pitch = max(2.5, min(24.0, abs_pitch * 0.70))
-                                    smooth_yaw = step_yaw if yaw > 0 else -step_yaw
-                                    smooth_pitch = step_pitch if pitch > 0 else -step_pitch
-                                    if abs(smooth_yaw) > abs_yaw:
-                                        smooth_yaw = yaw
-                                    if abs(smooth_pitch) > abs_pitch:
-                                        smooth_pitch = pitch
                                 _last_angles = (smooth_yaw, smooth_pitch)
                                 control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                             elif _aim_smooth and using_gun and _fire_held:
                                 # High-speed responsive lock when shooting
-                                if abs_yaw <= 3.5 and abs_pitch <= 3.0:
+                                factor = 0.85
+                                max_step_yaw = 48.0
+                                max_step_pitch = 32.0
+                                smooth_yaw = max(-max_step_yaw, min(max_step_yaw, yaw * factor))
+                                smooth_pitch = max(-max_step_pitch, min(max_step_pitch, pitch * factor))
+                                if abs(yaw) <= 2.5:
                                     smooth_yaw = yaw
+                                if abs(pitch) <= 1.8:
                                     smooth_pitch = pitch
-                                else:
-                                    step_yaw = max(6.0, min(50.0, abs_yaw * 0.85))
-                                    step_pitch = max(4.0, min(32.0, abs_pitch * 0.85))
-                                    smooth_yaw = step_yaw if yaw > 0 else -step_yaw
-                                    smooth_pitch = step_pitch if pitch > 0 else -step_pitch
-                                    if abs(smooth_yaw) > abs_yaw:
-                                        smooth_yaw = yaw
-                                    if abs(smooth_pitch) > abs_pitch:
-                                        smooth_pitch = pitch
                                 _last_angles = (smooth_yaw, smooth_pitch)
                                 control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                             else:
@@ -647,19 +615,19 @@ def _tick():
             except Waiting as aim_wait:
                 _waiting = str(aim_wait)
                 _target_id = None
-                _aim_state = 2 if _aim else 0
+                _aim_state = 2 if (_aim or _aim_smooth) else 0
             except Exception as aim_err:
                 _last_error = 'Aim process: %s: %s' % (type(aim_err).__name__, aim_err)
                 _target_id = None
-                _aim_state = 2 if _aim else 0
+                _aim_state = 2 if (_aim or _aim_smooth) else 0
     except Waiting as error:
         _waiting = str(error)
         _target_id = None
-        _aim_state = 2 if _aim else 0
+        _aim_state = 2 if (_aim or _aim_smooth) else 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         _target_id = None
-        _aim_state = 2 if _aim else 0
+        _aim_state = 2 if (_aim or _aim_smooth) else 0
         _esp_state = 2 if _esp else 0
 
 
