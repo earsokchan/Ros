@@ -164,6 +164,123 @@ def _enemy(go, player, service):
     except Exception:
         return False
 
+def _is_using_gun(player, local_entity):
+    """
+    Returns True only if the player is holding/using a firearm (Rifle, SMG, Sniper, Shotgun, Pistol).
+    Returns False if bare hands / fists, holstered weapon, melee (pan, crowbar), or throwables (grenades).
+    """
+    try:
+        if local_entity is None and player is None:
+            return False
+
+        # 1. Check if entity is currently holding ANY weapon via NeoX boolean methods
+        for fn_name in ('is_holding_weapon', 'isHoldingWeapon', 'is_hold_weapon', 'isHoldWeapon'):
+            fn = getattr(local_entity, fn_name, None)
+            if callable(fn):
+                try:
+                    if not bool(fn()):
+                        return False
+                except Exception:
+                    pass
+
+        # 2. Check bag / equip slot if available
+        # In ROS NeoX: 0=unarmed/bare hands, 1=primary 1, 2=primary 2, 3=pistol, 4=melee, 5=grenade
+        bag = getattr(local_entity, 'bag', None)
+        if bag is not None:
+            for slot_attr in ('cur_equip_pos', 'curEquipPos', 'cur_pos', 'curPos', 'cur_weapon_pos'):
+                pos = getattr(bag, slot_attr, None)
+                if pos is not None:
+                    try:
+                        pos_int = int(pos)
+                        if pos_int == 0:
+                            # Unarmed or running with empty hands
+                            return False
+                        if pos_int in (4, 5):
+                            # Melee weapon (pan/crowbar) or throwable (grenade)
+                            return False
+                        if pos_int in (1, 2, 3):
+                            # Primary firearm or handgun
+                            return True
+                    except Exception:
+                        pass
+
+        # 3. Check active weapon instance on local_entity or player
+        weapon = None
+        for obj in (local_entity, player):
+            if obj is None:
+                continue
+            for w_name in ('cur_weapon', 'curWeapon', 'weapon', 'current_weapon', 'hold_weapon', 'holdWeapon'):
+                w = getattr(obj, w_name, None)
+                if w is not None:
+                    weapon = w
+                    break
+            if weapon is not None:
+                break
+            for fn_name in ('get_cur_weapon', 'getCurWeapon', 'get_weapon', 'getWeapon', 'get_hold_weapon'):
+                fn = getattr(obj, fn_name, None)
+                if callable(fn):
+                    try:
+                        w = fn()
+                        if w:
+                            weapon = w
+                            break
+                    except Exception:
+                        pass
+            if weapon is not None:
+                break
+
+        # 4. If a weapon object exists, inspect whether it's a gun or melee/unarmed
+        if weapon is not None:
+            # Check explicit is_gun flag / method
+            for gun_attr in ('is_gun', 'isGun', 'is_firearm', 'isFirearm'):
+                g_val = getattr(weapon, gun_attr, None)
+                if g_val is not None:
+                    try:
+                        return bool(g_val() if callable(g_val) else g_val)
+                    except Exception:
+                        pass
+
+            # Check for melee or throwable flags
+            for melee_attr in ('is_melee', 'isMelee', 'is_throwable', 'isThrowable'):
+                m_val = getattr(weapon, melee_attr, None)
+                if m_val is not None:
+                    try:
+                        if bool(m_val() if callable(m_val) else m_val):
+                            return False
+                    except Exception:
+                        pass
+
+            # Check weapon name string for fists, melee, or grenades
+            w_name_str = str(getattr(weapon, 'name', '') or getattr(weapon, 'weapon_name', '') or getattr(weapon, 'desc', '') or '').lower()
+            if w_name_str:
+                if any(k in w_name_str for k in ('fist', 'bare', 'unarm', 'hand', 'melee', 'pan', 'crowbar', 'chicken', 'stick', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
+                    return False
+
+            # Check bullet/ammo attributes - only firearms have magazine, clip, or bullet counts
+            for bullet_attr in ('bullet_count', 'bulletCount', 'clip_bullet', 'clipBullet', 'cur_bullet', 'curBullet', 'max_bullet', 'maxBullet', 'magazine', 'ammo_count', 'ammoCount'):
+                if hasattr(weapon, bullet_attr):
+                    return True
+
+            # If weapon is an object and not melee/throwable, assume gun
+            return True
+
+        # 5. Check weapon ID on local_entity
+        for id_attr in ('cur_weapon_id', 'curWeaponId', 'weapon_id', 'weaponId'):
+            wid = getattr(local_entity, id_attr, None)
+            if wid is not None:
+                try:
+                    wid_val = int(wid)
+                    if wid_val <= 0:
+                        return False
+                    return True
+                except Exception:
+                    pass
+
+        # If we reached here without any weapon detected, the player is not holding a gun
+        return False
+    except Exception:
+        return False
+
 
 def _visible(Physics, RaycastHit, camera_position, point):
     direction = point - camera_position
@@ -390,8 +507,10 @@ def _tick():
             if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
                 _aim_state = 3
                 _fire_held = False
-            # Aim Smooth auto-aims 100% of the time without requiring fire button!
-            should_aim = _aim_smooth or _fire_held
+            # Aim Smooth auto-aims only when player is holding a firearm (gun)!
+            # If user has no gun (bare hands / fists / melee / throwables / running unholstered), do not aimsmooth.
+            using_gun = _is_using_gun(player, local_entity)
+            should_aim = (_aim_smooth and using_gun) or (_aim and _fire_held)
             if not should_aim:
                 _target_id = None
             else:
@@ -426,13 +545,13 @@ def _tick():
                         _target_id = None
                     else:
                         yaw, pitch = _angle_offset(selected[5], forward)
-                        if _aim_smooth and not _fire_held:
+                        if _aim_smooth and using_gun and not _fire_held:
                             # 100% Auto Aim Smooth: glide crosshair smoothly towards target without clicking shoot
                             smooth_yaw = max(-14.0, min(14.0, yaw * 0.32))
                             smooth_pitch = max(-9.0, min(9.0, pitch * 0.32))
                             _last_angles = (smooth_yaw, smooth_pitch)
                             control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                        elif _aim_smooth and _fire_held:
+                        elif _aim_smooth and using_gun and _fire_held:
                             # User clicked shoot: higher tracking response
                             smooth_yaw = max(-24.0, min(24.0, yaw * 0.60))
                             smooth_pitch = max(-16.0, min(16.0, pitch * 0.60))
