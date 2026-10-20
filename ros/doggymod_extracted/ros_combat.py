@@ -149,8 +149,56 @@ def _visible(Physics, RaycastHit, camera_position, point):
     distance = _finite(direction.magnitude)
     if distance <= 0.00001:
         return False
-    # Exact common.shoot_utils.isCanBeShot ray signature from this package.
     return not Physics.RaycastWithScene(camera_position, direction, RaycastHit(), distance)
+
+
+def _extract_real_name(entity, go):
+    if entity is None:
+        return 'Enemy'
+    # Try real role / player name fields from ROS game engine
+    for attr in ('role_name', 'roleName', 'nickname', 'nick_name', 'charName', 'char_name', 'userName', 'username', 'name'):
+        val = getattr(entity, attr, None)
+        if val:
+            s = str(val).strip()
+            low = s.lower()
+            if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low or 'entity_' in low or 'gameobject' in low or 'lod' in low or 'enemy' in low):
+                clean = s.replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+                if clean and clean != 'None' and clean != 'null':
+                    return clean
+    # Check headBar UI
+    hb = getattr(entity, 'headBar', None) or getattr(entity, 'head_bar', None)
+    if hb:
+        for attr in ('roleName', 'role_name', 'name', 'nickname'):
+            val = getattr(hb, attr, None)
+            if val:
+                s = str(val).strip()
+                low = s.lower()
+                if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low or 'entity_' in low):
+                    clean = s.replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+                    if clean and clean != 'None':
+                        return clean
+    # Check callable getter methods
+    for m in ('getRoleName', 'get_role_name', 'getNickName', 'getName'):
+        fn = getattr(entity, m, None)
+        if callable(fn):
+            try:
+                res = fn()
+                if res:
+                    s = str(res).strip()
+                    low = s.lower()
+                    if not ('(clone)' in low or 'avatar_' in low or 'robot_' in low):
+                        clean = s.replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+                        if clean and clean != 'None':
+                            return clean
+            except Exception:
+                pass
+    # Avoid showing Avatar_XXX(Clone) as user name
+    raw_name = getattr(go, 'name', '') or ''
+    low_go = str(raw_name).lower()
+    if '(clone)' in low_go or 'avatar' in low_go or 'robot' in low_go:
+        return 'Player'
+    clean = str(raw_name).replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
+    return clean if clean else 'Player'
 
 
 def _clear_frame():
@@ -247,10 +295,10 @@ def _tick():
             return
         unit, character, entity_id = ownership
         player = Globals.player
-        if not _fly._movement_eligible(unit) or getattr(player.entity, 'deadInGame', False):
+        if unit is None or getattr(player, 'entity', None) is None or getattr(player.entity, 'deadInGame', False):
             _esp_state = 3 if _esp else 0
             _aim_state = 3 if _aim else 0
-            _waiting = 'Local character paused'
+            _waiting = 'Local character dead'
             return
         owner = (id(player), entity_id, id(character))
         if owner != _owner:
@@ -352,7 +400,7 @@ def _tick():
                 dist_val = math.sqrt(max(0.0, c[7]))
 
                 can_shoot = bool(c[1] == _target_id)
-                if not can_shoot and i == 0 and _fire_held:
+                if not can_shoot and i < 24:
                     try:
                         can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
                     except Exception:
@@ -367,14 +415,8 @@ def _tick():
                 box_x = max(0.0, min(1.0 - box_w, box_x))
                 box_y = max(0.0, min(1.0 - box_h, box_y))
 
-                # Name
-                raw_name = (getattr(entity, 'roleName', None) or
-                            getattr(entity, 'name', None) or
-                            getattr(entity, 'charName', None) or
-                            getattr(go, 'name', None) or 'Enemy')
-                clean_name = str(raw_name).replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
-                if not clean_name:
-                    clean_name = 'Enemy'
+                # Real player name (avoiding engine clone names)
+                clean_name = _extract_real_name(entity, go)
 
                 dist_m = int(dist_val + 0.5)
 
@@ -424,7 +466,7 @@ def snapshot():
     global _esp_state, _aim_state, _last_error
     # ASCII integers only. Normalised screen coordinates are independent of
     # Retina scale. UIKit must discard stale frames, never draw old enemies.
-    if (_esp or _aim) and _timer is not None and time.time() - _last_tick > 2.0:
+    if (_esp or _aim) and (_timer is None or time.time() - _last_tick > 1.0):
         # Scene changes can discard the engine registry while a handle remains.
         try:
             _stop_timer()
@@ -435,7 +477,7 @@ def snapshot():
             _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
             return '10,4,4,0'
     age = time.time() - _frame_time
-    fresh = 0.0 <= age <= 0.25
+    fresh = 0.0 <= age <= 0.85
     rows = _frame if fresh and _esp else ()
     if not _esp:
         esp_state = 0
@@ -457,7 +499,7 @@ def esp_snapshot():
     if not _esp:
         return ""
     age = time.time() - _frame_time
-    if age < 0.0 or age > 0.35:
+    if age < 0.0 or age > 0.85:
         return ""
     try:
         parts = []
