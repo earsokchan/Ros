@@ -610,6 +610,25 @@ static id getSwitchSender(BOOL state) {
     return NULL;
 }
 
+static void ensureESPOverlayOnTop(void) {
+    id curWin = getActiveWindow();
+    if (curWin && g_espOverlay) {
+        id espSuper = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
+        if (espSuper != curWin) {
+            ((msgSend_void_id)objc_msgSend)(curWin, sel("addSubview:"), g_espOverlay);
+        }
+        ((msgSend_void_id)objc_msgSend)(curWin, sel("bringSubviewToFront:"), g_espOverlay);
+        if (g_panel) {
+            id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+            if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
+        }
+        if (g_floatBtn) {
+            id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
+            if (fSuper) ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
+        }
+    }
+}
+
 static void triggerTweakFeature(const char *selName, const char *swKey, BOOL state) {
     @autoreleasepool {
         Class defsCls = cls("NSUserDefaults");
@@ -637,6 +656,9 @@ static void triggerTweakFeature(const char *selName, const char *swKey, BOOL sta
                     printf("[FlyMenuUI] Executing %s (state=%d)\n", selName, (int)state);
                     ((void (*)(id, SEL, id))imp)((id)nsObj, fSel, sender);
                     printf("[FlyMenuUI] Completed %s (state=%d)\n", selName, (int)state);
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        ensureESPOverlayOnTop();
+                    });
                 }
             }
         }
@@ -1225,7 +1247,7 @@ static void updateRowStates(void) {
         if (g_coreBtns[3]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            aimOn = (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strstr(s, "ERROR") == NULL && strlen(s) > 3));
+            aimOn = (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
         }
         setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1234,7 +1256,7 @@ static void updateRowStates(void) {
         if (g_coreBtns[4]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            espOn = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strstr(s, "ERROR") == NULL && strlen(s) > 3));
+            espOn = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
         }
         setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1935,7 +1957,7 @@ static void ensureESPOverlay(id win) {
     if (!win) return;
     if (g_espOverlay) {
         id sView = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
-        if (!sView) {
+        if (sView != win) {
             ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
             if (g_panel) {
                 id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
@@ -2070,7 +2092,7 @@ static void updateESPOverlay(id win) {
     if (g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strstr(s, "ERROR") == NULL && strlen(s) > 3));
+        espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
     }
 
     if (!espActive) {
@@ -2082,21 +2104,6 @@ static void updateESPOverlay(id win) {
             if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
         }
         return;
-    }
-
-    // Keep ESP overlay above any views added by other mods/features (1 Hit, No Recoil, Wallhack)
-    id sView = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
-    if (sView != win) {
-        ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
-    }
-    ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_espOverlay);
-    if (g_panel) {
-        id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
-        if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
-    }
-    if (g_floatBtn) {
-        id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
-        if (fSuper) ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
     }
 
     char *snapStr = getESPSnapshot();
@@ -2311,8 +2318,15 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
             updateRowStates();
         }
 
-        // Keep floating logo and open menu always clickable on top
+        // Keep floating logo, open menu, and ESP overlay properly ordered on top
         if (tickCount % 20 == 0) {
+            if (g_espOverlay) {
+                id espSuper = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
+                if (espSuper != win) {
+                    ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
+                }
+                ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_espOverlay);
+            }
             if (g_floatBtn) {
                 id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
                 if (fSuper) {

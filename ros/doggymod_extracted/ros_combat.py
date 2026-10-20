@@ -142,15 +142,26 @@ def _screen_point(camera, point, resolution, origin, forward):
 
 
 def _enemy(go, player, service):
-    entity = getattr(go, 'entity', None)
-    local = player.entity
-    if entity is None or entity.id == local.id:
+    try:
+        entity = getattr(go, 'entity', None)
+        local = getattr(player, 'entity', None)
+        if entity is None or local is None or entity.id == local.id:
+            return False
+        if not (service.isAvatar(entity) or service.isRobot(entity)):
+            return False
+        if getattr(entity, 'campType', None) == getattr(local, 'campType', None) or (callable(getattr(local, 'isBattleMate', None)) and local.isBattleMate(entity.id)):
+            return False
+        if getattr(entity, 'deadInGame', False):
+            return False
+        try:
+            hp_val = float(getattr(entity, 'hp', 1.0))
+            if hp_val <= 0.0:
+                return False
+        except Exception:
+            pass
+        return True
+    except Exception:
         return False
-    if not (service.isAvatar(entity) or service.isRobot(entity)):
-        return False
-    if entity.campType == local.campType or local.isBattleMate(entity.id):
-        return False
-    return (float(entity.hp) > 0.0 and not getattr(entity, 'deadInGame', False))
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
@@ -274,20 +285,32 @@ def _tick():
         _clear_previous_target = _target_id
         _esp_state = 1 if _esp else 0
         _aim_state = 1 if _aim else 0
+        unit = None
+        character = None
+        entity_id = None
         player = getattr(Globals, 'player', None)
+        if _fly:
+            try:
+                target = _fly._target()
+                if target:
+                    unit, character, entity_id = target
+                    player = getattr(Globals, 'player', None) or player
+            except Exception:
+                pass
         if player is None:
-            _waiting = 'Waiting for Globals.player'
+            _waiting = 'Waiting for local player'
             return
         local_entity = getattr(player, 'entity', None)
         if local_entity is None:
             _waiting = 'Waiting for player.entity'
             return
-        if getattr(local_entity, 'deadInGame', False) or float(getattr(local_entity, 'hp', 1.0)) <= 0.0:
+        if getattr(local_entity, 'deadInGame', False):
             _esp_state = 3 if _esp else 0
             _aim_state = 3 if _aim else 0
             _waiting = 'Local character dead'
             return
-        entity_id = getattr(local_entity, 'id', None)
+        if entity_id is None:
+            entity_id = getattr(local_entity, 'id', None)
         owner = (id(player), entity_id)
         if owner != _owner:
             _clear_previous_target = None
@@ -475,10 +498,17 @@ def snapshot():
 
 
 def esp_snapshot():
-    global _esp, _last_esp_str, _frame_time
+    global _esp, _last_esp_str, _frame_time, _last_error
     if not _esp:
         return 'NONE'
-    age = time.time() - _frame_time
+    now = time.time()
+    if _timer is None or now - _last_tick > 3.0:
+        try:
+            _stop_timer()
+            _ensure_timer()
+        except Exception as error:
+            _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
+    age = now - _frame_time
     if age < 0.0 or age > 3.0:
         return 'NONE'
     return _last_esp_str or 'NONE'
