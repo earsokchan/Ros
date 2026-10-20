@@ -274,18 +274,21 @@ def _tick():
         _clear_previous_target = _target_id
         _esp_state = 1 if _esp else 0
         _aim_state = 1 if _aim else 0
-        ownership = _fly._target()
-        if ownership is None:
-            _waiting = 'Waiting for local character'
+        player = getattr(Globals, 'player', None)
+        if player is None:
+            _waiting = 'Waiting for Globals.player'
             return
-        unit, character, entity_id = ownership
-        player = Globals.player
-        if unit is None or getattr(player, 'entity', None) is None or getattr(player.entity, 'deadInGame', False):
+        local_entity = getattr(player, 'entity', None)
+        if local_entity is None:
+            _waiting = 'Waiting for player.entity'
+            return
+        if getattr(local_entity, 'deadInGame', False) or float(getattr(local_entity, 'hp', 1.0)) <= 0.0:
             _esp_state = 3 if _esp else 0
             _aim_state = 3 if _aim else 0
             _waiting = 'Local character dead'
             return
-        owner = (id(player), entity_id, id(character))
+        entity_id = getattr(local_entity, 'id', None)
+        owner = (id(player), entity_id)
         if owner != _owner:
             _clear_previous_target = None
             _owner = owner
@@ -369,10 +372,9 @@ def _tick():
                         selected = candidate
                         break
                 if selected is not None:
-                    # Check ownership again immediately before the camera request.
-                    latest = _fly._target()
-                    if (latest is None or latest[0] is not unit or latest[1] is not character
-                            or latest[2] != entity_id or Globals.player is not player):
+                    # Check player validity before the camera request.
+                    latest_player = getattr(Globals, 'player', None)
+                    if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
                         raise Waiting('Local character changed')
                     if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False):
                         selected = None

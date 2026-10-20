@@ -2084,11 +2084,26 @@ static void updateESPOverlay(id win) {
         return;
     }
 
+    // Keep ESP overlay above any views added by other mods/features (1 Hit, No Recoil, Wallhack)
+    id sView = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
+    if (sView != win) {
+        ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
+    }
+    ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_espOverlay);
+    if (g_panel) {
+        id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+        if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
+    }
+    if (g_floatBtn) {
+        id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
+        if (fSuper) ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
+    }
+
     char *snapStr = getESPSnapshot();
     static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
         s_emptyFrames++;
-        if (s_emptyFrames > 15) {
+        if (s_emptyFrames > 30) {
             if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
             if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
             if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
