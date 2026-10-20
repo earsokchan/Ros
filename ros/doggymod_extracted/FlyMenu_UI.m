@@ -2194,7 +2194,9 @@ static void updateESPOverlay(id win) {
         espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
     }
 
-    if (!espActive) {
+    char *snapStr = getESPSnapshot();
+    // If ESP is not active in the button AND Python has no live snapshot data, clear and return
+    if (!espActive && (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0)) {
         if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
         if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
         if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -2202,14 +2204,14 @@ static void updateESPOverlay(id win) {
         for (int i = 0; i < MAX_ESP_LABELS; i++) {
             if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
         }
+        if (snapStr) free(snapStr);
         return;
     }
 
-    char *snapStr = getESPSnapshot();
     static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
         s_emptyFrames++;
-        if (s_emptyFrames > 30) {
+        if (s_emptyFrames > 15) {
             if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
             if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
             if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -2244,7 +2246,7 @@ static void updateESPOverlay(id win) {
     Class nsString = cls("NSString");
     int labelIdx = 0;
 
-    if (strchr(snapStr, ';') != NULL) {
+    if (strchr(snapStr, ',') != NULL && strncmp(snapStr, "10,", 3) != 0) {
         // Rich ESP format: canShoot,lx,ly,bx,by,bw,bh,dist,name;...
         char *savePtr = NULL;
         char *token = strtok_r(snapStr, ";", &savePtr);

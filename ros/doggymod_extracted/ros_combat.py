@@ -488,162 +488,170 @@ def _tick():
         _aim_state = 1 if _aim else 0
         _waiting = ''
         esp_candidates = [c for c in candidates if c[9]]
-        _frame = tuple((c[2], c[3], False) for c in esp_candidates[:_max_lines]) if _esp else ()
-        _frame_time = now
-        selected = None
-        if _aim or _aim_smooth:
-            input_go = getattr(Globals, 'userInput', None)
-            if input_go is None:
-                raise Waiting('Waiting for Globals.userInput')
-            get_component = getattr(input_go, 'GetComponent', None)
-            if not callable(get_component):
-                raise Waiting('Live UserInput GameObject has no GetComponent')
-            input_component = get_component('InputInterpred')
-            if input_component is None:
-                raise Waiting('Waiting for InputInterpred component')
-            if not hasattr(input_component, '_isFireBtnDwn'):
-                raise Waiting('Live input has no _isFireBtnDwn')
-            _fire_held = bool(input_component._isFireBtnDwn)
-            if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
-                _aim_state = 3
-                _fire_held = False
-            # Aim Smooth auto-aims only when player is holding a firearm (gun)!
-            # If user has no gun (bare hands / fists / melee / throwables / running unholstered), do not aimsmooth.
-            using_gun = _is_using_gun(player, local_entity)
-            should_aim = (_aim_smooth and using_gun) or (_aim and _fire_held)
-            if not should_aim:
-                _target_id = None
-            else:
-                control = camera.GetComponent('PlayerCameraController')
-                # CPlayerCameraController._onRotateCamera is an empty routine;
-                # fail explicitly rather than claiming a lock on that backend.
-                if (control is None or not callable(getattr(control, 'onRotateCamera', None))
-                        or getattr(control, 'controller', None) is not None):
-                    raise Waiting('Unsupported live camera controller')
-                # Prioritize closest enemy to player character (20m before 100m)
-                pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
-                # When shooting, retain locked target so sprays remain consistent on the target
-                if _fire_held and _clear_previous_target is not None:
-                    retained = [c for c in pool if c[1] == _clear_previous_target]
-                    if retained:
-                        pool = retained + [c for c in pool if c[1] != _clear_previous_target]
-
-                # Immediate lock: Pass 1 finds closest visible enemy via direct physics raycast
-                selected = None
-                for candidate in pool[:10]:
-                    if _visible(Physics, RaycastHit, camera_position, candidate[4]):
-                        selected = candidate
-                        break
-                # Pass 2: if direct raycast fails (e.g. grass, leaves, fence, window), lock onto closest enemy on screen
-                if selected is None:
-                    for candidate in pool[:8]:
-                        if candidate[9] or candidate[0] <= 80.0:
-                            selected = candidate
-                            break
-                # Pass 3: fallback to closest pool enemy
-                if selected is None and pool:
-                    selected = pool[0]
-
-                if selected is not None:
-                    # Check player validity before the camera request.
-                    latest_player = getattr(Globals, 'player', None)
-                    if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
-                        raise Waiting('Local character changed')
-                    if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False):
-                        selected = None
-                        _target_id = None
-                    else:
-                        yaw, pitch = _angle_offset(selected[5], forward)
-                        abs_yaw = abs(yaw)
-                        abs_pitch = abs(pitch)
-                        if _aim_smooth and using_gun and not _fire_held:
-                            # Fast, responsive Aim Smooth: quick snap & smooth tracking without lag/delay
-                            if abs_yaw <= 2.5 and abs_pitch <= 2.0:
-                                smooth_yaw = yaw
-                                smooth_pitch = pitch
-                            else:
-                                step_yaw = max(4.0, min(38.0, abs_yaw * 0.70))
-                                step_pitch = max(2.5, min(24.0, abs_pitch * 0.70))
-                                smooth_yaw = step_yaw if yaw > 0 else -step_yaw
-                                smooth_pitch = step_pitch if pitch > 0 else -step_pitch
-                                if abs(smooth_yaw) > abs_yaw:
-                                    smooth_yaw = yaw
-                                if abs(smooth_pitch) > abs_pitch:
-                                    smooth_pitch = pitch
-                            _last_angles = (smooth_yaw, smooth_pitch)
-                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                        elif _aim_smooth and using_gun and _fire_held:
-                            # High-speed responsive lock when shooting
-                            if abs_yaw <= 3.5 and abs_pitch <= 3.0:
-                                smooth_yaw = yaw
-                                smooth_pitch = pitch
-                            else:
-                                step_yaw = max(6.0, min(50.0, abs_yaw * 0.85))
-                                step_pitch = max(4.0, min(32.0, abs_pitch * 0.85))
-                                smooth_yaw = step_yaw if yaw > 0 else -step_yaw
-                                smooth_pitch = step_pitch if pitch > 0 else -step_pitch
-                                if abs(smooth_yaw) > abs_yaw:
-                                    smooth_yaw = yaw
-                                if abs(smooth_pitch) > abs_pitch:
-                                    smooth_pitch = pitch
-                            _last_angles = (smooth_yaw, smooth_pitch)
-                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                        else:
-                            # Instant lock when Aimbot 360 Lock is used alone
-                            _last_angles = (yaw, pitch)
-                            control.onRotateCamera(Vector2(yaw, pitch), True)
-                        _aim_writes += 1
-                        _aim_state = 5
-                        _target_id = selected[1]
         if _esp:
-            rich_items = []
-            for i, c in enumerate(esp_candidates[:_max_lines]):
-                go = c[6]
-                point = c[4]
-                entity = getattr(go, 'entity', None)
-                dist_val = math.sqrt(max(0.0, c[7]))
+            try:
+                rich_items = []
+                for i, c in enumerate(esp_candidates[:_max_lines]):
+                    go = c[6]
+                    point = c[4]
+                    entity = getattr(go, 'entity', None)
+                    dist_val = math.sqrt(max(0.0, c[7]))
 
-                # can_shoot: target locked or in active crosshair view / closest visible
-                can_shoot = bool(c[1] == _target_id)
-                if not can_shoot and (c[0] <= 12.0 or i == 0):
-                    try:
-                        can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
-                    except Exception:
-                        can_shoot = False
+                    # can_shoot: target locked or in active crosshair view / closest visible
+                    can_shoot = bool(c[1] == _target_id)
+                    if not can_shoot and (c[0] <= 12.0 or i == 0):
+                        try:
+                            can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
+                        except Exception:
+                            can_shoot = False
 
-                # Safe perspective bounding box calculation
-                box_h = max(0.016, min(0.85, 2.0 / (dist_val + 0.5)))
-                box_w = box_h * 0.48
-                box_x = c[2] - box_w * 0.5
-                box_y = c[3] - box_h * 0.45
+                    # Safe perspective bounding box calculation
+                    box_h = max(0.016, min(0.85, 2.0 / (dist_val + 0.5)))
+                    box_w = box_h * 0.48
+                    box_x = max(0.0, min(1.0 - box_w, c[2] - box_w * 0.5))
+                    box_y = max(0.0, min(1.0 - box_h, c[3] - box_h * 0.45))
 
-                box_x = max(0.0, min(1.0 - box_w, box_x))
-                box_y = max(0.0, min(1.0 - box_h, box_y))
+                    # Real player name (avoiding engine clone names)
+                    clean_name = _extract_real_name(entity, go)
+                    dist_m = int(dist_val + 0.5)
 
-                # Real player name (avoiding engine clone names)
-                clean_name = _extract_real_name(entity, go)
+                    lx_i = int(c[2] * 10000.0 + 0.5)
+                    ly_i = int((box_y + box_h) * 10000.0 + 0.5)
+                    bx_i = int(box_x * 10000.0 + 0.5)
+                    by_i = int(box_y * 10000.0 + 0.5)
+                    bw_i = int(box_w * 10000.0 + 0.5)
+                    bh_i = int(box_h * 10000.0 + 0.5)
+                    cs_i = 1 if (can_shoot or c[1] == _target_id) else 0
 
-                dist_m = int(dist_val + 0.5)
+                    rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
 
-                lx_i = int(c[2] * 10000.0 + 0.5)
-                ly_i = int((box_y + box_h) * 10000.0 + 0.5)
-                bx_i = int(box_x * 10000.0 + 0.5)
-                by_i = int(box_y * 10000.0 + 0.5)
-                bw_i = int(box_w * 10000.0 + 0.5)
-                bh_i = int(box_h * 10000.0 + 0.5)
-                cs_i = 1 if (can_shoot or c[1] == _target_id) else 0
-
-                rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
-            _rich_esp_frame = tuple(rich_items)
-            _last_esp_str = ';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items) if rich_items else 'NONE'
-            _frame = tuple((c[2], c[3], bool(cs_i)) for c in esp_candidates[:_max_lines])
-            _write_esp_file(_last_esp_str if _last_esp_str != 'NONE' else '')
+                _rich_esp_frame = tuple(rich_items)
+                _last_esp_str = (';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items) + ';') if rich_items else 'NONE'
+                _frame = tuple((it[1] / 10000.0, it[2] / 10000.0, bool(it[0])) for it in rich_items)
+                _write_esp_file(_last_esp_str if _last_esp_str != 'NONE' else '')
+            except Exception as esp_err:
+                _last_error = 'ESP process: %s: %s' % (type(esp_err).__name__, esp_err)
         else:
             _rich_esp_frame = ()
             _last_esp_str = 'NONE'
             _frame = ()
             _write_esp_file('')
         _frame_time = now
+
+        selected = None
+        if _aim or _aim_smooth:
+            try:
+                input_go = getattr(Globals, 'userInput', None)
+                if input_go is None:
+                    raise Waiting('Waiting for Globals.userInput')
+                get_component = getattr(input_go, 'GetComponent', None)
+                if not callable(get_component):
+                    raise Waiting('Live UserInput GameObject has no GetComponent')
+                input_component = get_component('InputInterpred')
+                if input_component is None:
+                    raise Waiting('Waiting for InputInterpred component')
+                if not hasattr(input_component, '_isFireBtnDwn'):
+                    raise Waiting('Live input has no _isFireBtnDwn')
+                _fire_held = bool(input_component._isFireBtnDwn)
+                if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
+                    _aim_state = 3
+                    _fire_held = False
+                # Aim Smooth auto-aims only when player is holding a firearm (gun)!
+                # If user has no gun (bare hands / fists / melee / throwables / running unholstered), do not aimsmooth.
+                using_gun = _is_using_gun(player, local_entity)
+                should_aim = (_aim_smooth and using_gun) or (_aim and _fire_held)
+                if not should_aim:
+                    _target_id = None
+                else:
+                    control = camera.GetComponent('PlayerCameraController')
+                    # CPlayerCameraController._onRotateCamera is an empty routine;
+                    # fail explicitly rather than claiming a lock on that backend.
+                    if (control is None or not callable(getattr(control, 'onRotateCamera', None))
+                            or getattr(control, 'controller', None) is not None):
+                        raise Waiting('Unsupported live camera controller')
+                    # Prioritize closest enemy to player character (20m before 100m)
+                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
+                    # When shooting, retain locked target so sprays remain consistent on the target
+                    if _fire_held and _clear_previous_target is not None:
+                        retained = [c for c in pool if c[1] == _clear_previous_target]
+                        if retained:
+                            pool = retained + [c for c in pool if c[1] != _clear_previous_target]
+
+                    # Immediate lock: Pass 1 finds closest visible enemy via direct physics raycast
+                    selected = None
+                    for candidate in pool[:10]:
+                        if _visible(Physics, RaycastHit, camera_position, candidate[4]):
+                            selected = candidate
+                            break
+                    # Pass 2: if direct raycast fails (e.g. grass, leaves, fence, window), lock onto closest enemy on screen
+                    if selected is None:
+                        for candidate in pool[:8]:
+                            if candidate[9] or candidate[0] <= 80.0:
+                                selected = candidate
+                                break
+                    # Pass 3: fallback to closest pool enemy
+                    if selected is None and pool:
+                        selected = pool[0]
+
+                    if selected is not None:
+                        # Check player validity before the camera request.
+                        latest_player = getattr(Globals, 'player', None)
+                        if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
+                            raise Waiting('Local character changed')
+                        if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False):
+                            selected = None
+                            _target_id = None
+                        else:
+                            yaw, pitch = _angle_offset(selected[5], forward)
+                            abs_yaw = abs(yaw)
+                            abs_pitch = abs(pitch)
+                            if _aim_smooth and using_gun and not _fire_held:
+                                # Fast, responsive Aim Smooth: quick snap & smooth tracking without lag/delay
+                                if abs_yaw <= 2.5 and abs_pitch <= 2.0:
+                                    smooth_yaw = yaw
+                                    smooth_pitch = pitch
+                                else:
+                                    step_yaw = max(4.0, min(38.0, abs_yaw * 0.70))
+                                    step_pitch = max(2.5, min(24.0, abs_pitch * 0.70))
+                                    smooth_yaw = step_yaw if yaw > 0 else -step_yaw
+                                    smooth_pitch = step_pitch if pitch > 0 else -step_pitch
+                                    if abs(smooth_yaw) > abs_yaw:
+                                        smooth_yaw = yaw
+                                    if abs(smooth_pitch) > abs_pitch:
+                                        smooth_pitch = pitch
+                                _last_angles = (smooth_yaw, smooth_pitch)
+                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                            elif _aim_smooth and using_gun and _fire_held:
+                                # High-speed responsive lock when shooting
+                                if abs_yaw <= 3.5 and abs_pitch <= 3.0:
+                                    smooth_yaw = yaw
+                                    smooth_pitch = pitch
+                                else:
+                                    step_yaw = max(6.0, min(50.0, abs_yaw * 0.85))
+                                    step_pitch = max(4.0, min(32.0, abs_pitch * 0.85))
+                                    smooth_yaw = step_yaw if yaw > 0 else -step_yaw
+                                    smooth_pitch = step_pitch if pitch > 0 else -step_pitch
+                                    if abs(smooth_yaw) > abs_yaw:
+                                        smooth_yaw = yaw
+                                    if abs(smooth_pitch) > abs_pitch:
+                                        smooth_pitch = pitch
+                                _last_angles = (smooth_yaw, smooth_pitch)
+                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                            else:
+                                # Instant lock when Aimbot 360 Lock is used alone
+                                _last_angles = (yaw, pitch)
+                                control.onRotateCamera(Vector2(yaw, pitch), True)
+                            _aim_writes += 1
+                            _aim_state = 5
+                            _target_id = selected[1]
+            except Waiting as aim_wait:
+                _waiting = str(aim_wait)
+                _target_id = None
+                _aim_state = 2 if _aim else 0
+            except Exception as aim_err:
+                _last_error = 'Aim process: %s: %s' % (type(aim_err).__name__, aim_err)
+                _target_id = None
+                _aim_state = 2 if _aim else 0
     except Waiting as error:
         _waiting = str(error)
         _target_id = None
