@@ -12,6 +12,7 @@
 
 #include "embedded_scripts.h"
 #import "embedded_header_png.h"
+#import "embedded_donate_jpeg.h"
 
 #define sel(s) sel_registerName(s)
 #define cls(c) objc_getClass(c)
@@ -85,6 +86,7 @@ static id g_espRedBoxLayer = NULL;
 static id g_espGreenBoxLayer = NULL;
 #define MAX_ESP_LABELS 32
 static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
+static id g_infoModal = NULL;
 
 // Helper to get app Documents path using pure Objective-C runtime
 static id getDocumentsPath(const char *filename) {
@@ -749,6 +751,288 @@ static void toggleWallhack_imp(id self, SEL _cmd, id sender) {
     printf("[FlyMenuUI] Wallhack VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
+static void closeInfoModal_imp(id self, SEL _cmd, id sender) {
+    if (g_infoModal) {
+        ((void (*)(id, SEL))objc_msgSend)(g_infoModal, sel("removeFromSuperview"));
+        g_infoModal = NULL;
+    }
+}
+
+static void openTelegramGroup_imp(id self, SEL _cmd, id sender) {
+    Class uiApp = cls("UIApplication");
+    Class nsUrl = cls("NSURL");
+    Class nsStr = cls("NSString");
+    if (uiApp && nsUrl && nsStr) {
+        id app = ((id (*)(id, SEL))objc_msgSend)((id)uiApp, sel("sharedApplication"));
+        id urlStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "https://t.me/+syJHus_hGxgxZTJl");
+        id url = ((id (*)(id, SEL, id))objc_msgSend)((id)nsUrl, sel("URLWithString:"), urlStr);
+        if (app && url) {
+            ((void (*)(id, SEL, id))objc_msgSend)(app, sel("openURL:"), url);
+        }
+    }
+}
+
+static void openTelegramUser_imp(id self, SEL _cmd, id sender) {
+    Class uiApp = cls("UIApplication");
+    Class nsUrl = cls("NSURL");
+    Class nsStr = cls("NSString");
+    if (uiApp && nsUrl && nsStr) {
+        id app = ((id (*)(id, SEL))objc_msgSend)((id)uiApp, sel("sharedApplication"));
+        id urlStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "https://t.me/ikhozzzz");
+        id url = ((id (*)(id, SEL, id))objc_msgSend)((id)nsUrl, sel("URLWithString:"), urlStr);
+        if (app && url) {
+            ((void (*)(id, SEL, id))objc_msgSend)(app, sel("openURL:"), url);
+        }
+    }
+}
+
+static void showCustomInfo_imp(id self, SEL _cmd, id sender) {
+    id win = getActiveWindow();
+    if (!win) return;
+
+    if (g_infoModal) {
+        ((void (*)(id, SEL))objc_msgSend)(g_infoModal, sel("removeFromSuperview"));
+        g_infoModal = NULL;
+    }
+
+    CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
+    double modalW = 280.0;
+    double modalH = 410.0;
+    double modalX = (winBounds.size.width - modalW) * 0.5;
+    double modalY = (winBounds.size.height - modalH) * 0.5;
+    if (modalY < 20.0) modalY = 20.0;
+
+    Class uiView = cls("UIView");
+    Class uiColor = cls("UIColor");
+    Class uiLabel = cls("UILabel");
+    Class uiBtn = cls("UIButton");
+    Class uiFont = cls("UIFont");
+    Class nsStr = cls("NSString");
+    Class imgViewCls = cls("UIImageView");
+    Class imgCls = cls("UIImage");
+    Class nsData = cls("NSData");
+
+    id modal = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
+    if (!modal) return;
+    ((msgSend_void_rect)objc_msgSend)(modal, sel("setFrame:"), CGRectMake(modalX, modalY, modalW, modalH));
+
+    if (uiColor) {
+        id bg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.08, 0.08, 0.11, 0.98);
+        if (bg) ((msgSend_void_id)objc_msgSend)(modal, sel("setBackgroundColor:"), bg);
+
+        id mLayer = ((id (*)(id, SEL))objc_msgSend)(modal, sel("layer"));
+        if (mLayer) {
+            ((msgSend_void_double)objc_msgSend)(mLayer, sel("setCornerRadius:"), 14.0);
+            ((msgSend_void_double)objc_msgSend)(mLayer, sel("setBorderWidth:"), 1.5);
+            id borderC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.60, 1.0, 0.60);
+            if (borderC) ((msgSend_void_id)objc_msgSend)(mLayer, sel("setBorderColor:"), ((id (*)(id, SEL))objc_msgSend)(borderC, sel("CGColor")));
+            ((msgSend_void_long)objc_msgSend)(mLayer, sel("setMasksToBounds:"), 1);
+        }
+    }
+
+    // Header Title: "ikhozzzz VIP Info"
+    if (uiLabel && nsStr) {
+        id titleLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
+        if (titleLbl) {
+            ((msgSend_void_rect)objc_msgSend)(titleLbl, sel("setFrame:"), CGRectMake(14, 12, modalW - 60, 24));
+            id tStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "ikhozzzz VIP Info");
+            if (tStr) ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setText:"), tStr);
+            if (uiColor) {
+                id whiteC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                if (whiteC) ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setTextColor:"), whiteC);
+            }
+            if (uiFont) {
+                id boldF = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 16.0);
+                if (boldF) ((msgSend_void_id)objc_msgSend)(titleLbl, sel("setFont:"), boldF);
+            }
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), titleLbl);
+        }
+    }
+
+    // Close button [✕]
+    if (uiBtn && nsStr) {
+        id closeB = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (closeB) {
+            ((msgSend_void_rect)objc_msgSend)(closeB, sel("setFrame:"), CGRectMake(modalW - 38, 8, 30, 30));
+            id xStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "✕");
+            if (xStr) ((msgSend_id_id_long)objc_msgSend)(closeB, sel("setTitle:forState:"), xStr, 0);
+            if (uiColor) {
+                id greyC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.8, 0.8, 0.85, 1.0);
+                if (greyC) ((msgSend_id_id_long)objc_msgSend)(closeB, sel("setTitleColor:forState:"), greyC, 0);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 17.0);
+                id lbl = ((id (*)(id, SEL))objc_msgSend)(closeB, sel("titleLabel"));
+                if (lbl && f) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id_sel_long)objc_msgSend)(closeB, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("closeInfoModal:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), closeB);
+        }
+    }
+
+    // Author & Telegram Label
+    if (uiLabel && nsStr) {
+        id authorLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
+        if (authorLbl) {
+            ((msgSend_void_rect)objc_msgSend)(authorLbl, sel("setFrame:"), CGRectMake(14, 40, modalW - 28, 20));
+            id aStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "Author: ikhozzzz  •  @ikhozzzz");
+            if (aStr) ((msgSend_void_id)objc_msgSend)(authorLbl, sel("setText:"), aStr);
+            if (uiColor) {
+                id cyanC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.80, 1.0, 1.0);
+                if (cyanC) ((msgSend_void_id)objc_msgSend)(authorLbl, sel("setTextColor:"), cyanC);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 11.5);
+                if (f) ((msgSend_void_id)objc_msgSend)(authorLbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), authorLbl);
+        }
+    }
+
+    // Donate QR Code Image View
+    if (imgViewCls && imgCls && nsData) {
+        id imgData = ((id (*)(id, SEL, const void *, unsigned long))objc_msgSend)((id)nsData, sel("dataWithBytes:length:"), EMBEDDED_DONATE_JPEG, EMBEDDED_DONATE_JPEG_LEN);
+        id qrImg = imgData ? ((id (*)(id, SEL, id))objc_msgSend)((id)imgCls, sel("imageWithData:"), imgData) : NULL;
+
+        double qrSize = 175.0;
+        double qrX = (modalW - qrSize) * 0.5;
+        double qrY = 66.0;
+
+        id qrView = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)imgViewCls, sel("alloc")), sel("init"));
+        if (qrView) {
+            ((msgSend_void_rect)objc_msgSend)(qrView, sel("setFrame:"), CGRectMake(qrX, qrY, qrSize, qrSize));
+            if (qrImg) ((msgSend_void_id)objc_msgSend)(qrView, sel("setImage:"), qrImg);
+            ((msgSend_void_long)objc_msgSend)(qrView, sel("setContentMode:"), 1); // AspectFit
+
+            if (uiColor) {
+                id whiteC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                if (whiteC) ((msgSend_void_id)objc_msgSend)(qrView, sel("setBackgroundColor:"), whiteC);
+            }
+
+            id qrLayer = ((id (*)(id, SEL))objc_msgSend)(qrView, sel("layer"));
+            if (qrLayer) {
+                ((msgSend_void_double)objc_msgSend)(qrLayer, sel("setCornerRadius:"), 10.0);
+                ((msgSend_void_double)objc_msgSend)(qrLayer, sel("setBorderWidth:"), 2.0);
+                if (uiColor) {
+                    id bC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.25, 0.25, 0.35, 1.0);
+                    if (bC) ((msgSend_void_id)objc_msgSend)(qrLayer, sel("setBorderColor:"), ((id (*)(id, SEL))objc_msgSend)(bC, sel("CGColor")));
+                }
+                ((msgSend_void_long)objc_msgSend)(qrLayer, sel("setMasksToBounds:"), 1);
+            }
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), qrView);
+        }
+    }
+
+    // QR Caption: "Scan QR Code for Donate"
+    if (uiLabel && nsStr) {
+        id capLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
+        if (capLbl) {
+            ((msgSend_void_rect)objc_msgSend)(capLbl, sel("setFrame:"), CGRectMake(14, 248, modalW - 28, 18));
+            id capStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "Scan QR Code for Donate");
+            if (capStr) ((msgSend_void_id)objc_msgSend)(capLbl, sel("setText:"), capStr);
+            ((msgSend_void_long)objc_msgSend)(capLbl, sel("setTextAlignment:"), 1); // Center
+            if (uiColor) {
+                id goldC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.95, 0.80, 0.25, 1.0);
+                if (goldC) ((msgSend_void_id)objc_msgSend)(capLbl, sel("setTextColor:"), goldC);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 11.0);
+                if (f) ((msgSend_void_id)objc_msgSend)(capLbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), capLbl);
+        }
+    }
+
+    // Button 1: "💬 Join Telegram Group"
+    if (uiBtn && nsStr) {
+        id grpBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (grpBtn) {
+            ((msgSend_void_rect)objc_msgSend)(grpBtn, sel("setFrame:"), CGRectMake(16, 272, modalW - 32, 34));
+            id gTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "💬 Join Telegram Group");
+            if (gTitle) ((msgSend_id_id_long)objc_msgSend)(grpBtn, sel("setTitle:forState:"), gTitle, 0);
+            if (uiColor) {
+                id blueBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 0.53, 0.80, 1.0);
+                if (blueBg) ((msgSend_void_id)objc_msgSend)(grpBtn, sel("setBackgroundColor:"), blueBg);
+                id whiteC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                if (whiteC) ((msgSend_id_id_long)objc_msgSend)(grpBtn, sel("setTitleColor:forState:"), whiteC, 0);
+            }
+            id bLayer = ((id (*)(id, SEL))objc_msgSend)(grpBtn, sel("layer"));
+            if (bLayer) {
+                ((msgSend_void_double)objc_msgSend)(bLayer, sel("setCornerRadius:"), 8.0);
+                ((msgSend_void_long)objc_msgSend)(bLayer, sel("setMasksToBounds:"), 1);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 12.0);
+                id lbl = ((id (*)(id, SEL))objc_msgSend)(grpBtn, sel("titleLabel"));
+                if (lbl && f) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id_sel_long)objc_msgSend)(grpBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("openTelegramGroup:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), grpBtn);
+        }
+    }
+
+    // Button 2: "👤 Telegram @ikhozzzz"
+    if (uiBtn && nsStr) {
+        id tgBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (tgBtn) {
+            ((msgSend_void_rect)objc_msgSend)(tgBtn, sel("setFrame:"), CGRectMake(16, 312, modalW - 32, 34));
+            id tgTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "👤 Telegram @ikhozzzz");
+            if (tgTitle) ((msgSend_id_id_long)objc_msgSend)(tgBtn, sel("setTitle:forState:"), tgTitle, 0);
+            if (uiColor) {
+                id darkBlue = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.12, 0.22, 0.35, 1.0);
+                if (darkBlue) ((msgSend_void_id)objc_msgSend)(tgBtn, sel("setBackgroundColor:"), darkBlue);
+                id whiteC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                if (whiteC) ((msgSend_id_id_long)objc_msgSend)(tgBtn, sel("setTitleColor:forState:"), whiteC, 0);
+            }
+            id bLayer = ((id (*)(id, SEL))objc_msgSend)(tgBtn, sel("layer"));
+            if (bLayer) {
+                ((msgSend_void_double)objc_msgSend)(bLayer, sel("setCornerRadius:"), 8.0);
+                ((msgSend_void_long)objc_msgSend)(bLayer, sel("setMasksToBounds:"), 1);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 12.0);
+                id lbl = ((id (*)(id, SEL))objc_msgSend)(tgBtn, sel("titleLabel"));
+                if (lbl && f) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id_sel_long)objc_msgSend)(tgBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("openTelegramUser:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), tgBtn);
+        }
+    }
+
+    // Button 3: "Close"
+    if (uiBtn && nsStr) {
+        id okBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (okBtn) {
+            ((msgSend_void_rect)objc_msgSend)(okBtn, sel("setFrame:"), CGRectMake(16, 352, modalW - 32, 34));
+            id okTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), "Close");
+            if (okTitle) ((msgSend_id_id_long)objc_msgSend)(okBtn, sel("setTitle:forState:"), okTitle, 0);
+            if (uiColor) {
+                id greyBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.18, 0.18, 0.22, 1.0);
+                if (greyBg) ((msgSend_void_id)objc_msgSend)(okBtn, sel("setBackgroundColor:"), greyBg);
+                id whiteC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+                if (whiteC) ((msgSend_id_id_long)objc_msgSend)(okBtn, sel("setTitleColor:forState:"), whiteC, 0);
+            }
+            id bLayer = ((id (*)(id, SEL))objc_msgSend)(okBtn, sel("layer"));
+            if (bLayer) {
+                ((msgSend_void_double)objc_msgSend)(bLayer, sel("setCornerRadius:"), 8.0);
+                ((msgSend_void_long)objc_msgSend)(bLayer, sel("setMasksToBounds:"), 1);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 12.0);
+                id lbl = ((id (*)(id, SEL))objc_msgSend)(okBtn, sel("titleLabel"));
+                if (lbl && f) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id_sel_long)objc_msgSend)(okBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("closeInfoModal:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), okBtn);
+        }
+    }
+
+    // Add modal to active window
+    ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), modal);
+    ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), modal);
+    g_infoModal = modal;
+}
+
 // Update layout of the buttons based on active tab filter
 static void updateRowLayout(void) {
     double startY = 84.0;
@@ -799,6 +1083,10 @@ static void selectTab_imp(id self, SEL _cmd, id sender) {
         g_selectedTab = -1; // Toggle back to Show All
     } else {
         g_selectedTab = (int)tag;
+    }
+
+    if (tag == 3 && g_selectedTab == 3) {
+        showCustomInfo_imp(self, _cmd, sender);
     }
 
     Class uiColor = cls("UIColor");
@@ -1471,6 +1759,12 @@ static void setupMenuUI(id win, id panel) {
             }
         }
 
+        // For button 5 (Flight Diagnostics & Info), rewire action to custom info modal
+        if (i == 5) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0xFFFFFFFF);
+            ((msgSend_void_id_sel_long)objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("showCustomInfo:"), 1 << 6);
+        }
+
         // Bring button to front so touches are natively received
         ((msgSend_void_id)objc_msgSend)(panel, sel("bringSubviewToFront:"), btn);
     }
@@ -1917,10 +2211,20 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("openTelegramUser:"), (IMP)openTelegramUser_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("isOn"), (IMP)swIsOn_fallback, "B@:");
         objc_registerClassPair(uiMgrCls);
     } else {
         uiMgrCls = cls("ROSUIManager");
+        if (uiMgrCls) {
+            class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("openTelegramUser:"), (IMP)openTelegramUser_imp, "v@:@");
+        }
     }
     if (uiMgrCls && !g_uiMgr) {
         g_uiMgr = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiMgrCls, sel("alloc")), sel("init"));
