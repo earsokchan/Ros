@@ -66,8 +66,8 @@ static id g_floatBtn = NULL;
 static id (*orig_pathForResource)(id self, SEL _cmd, id name, id ext) = NULL;
 
 // References to native core buttons + custom VIP buttons
-#define NUM_BUTTONS 10
-static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack
+#define NUM_BUTTONS 11
+static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack, 10:AimSmooth
 static id g_rowPills[NUM_BUTTONS] = { NULL };    // Toggle switch indicators
 static id g_rowKnobs[NUM_BUTTONS] = { NULL };    // Inner sliding thumb knob
 static id g_rowLabels[NUM_BUTTONS] = { NULL };   // Clean titles
@@ -1117,8 +1117,8 @@ static void updateRowLayout(void) {
 
         BOOL show = YES;
         if (g_selectedTab == 0) {
-            // Aim/Combat tab: show Aim (3), 1 Hit (6), No Recoil (8)
-            show = (i == 3 || i == 6 || i == 8);
+            // Aim/Combat tab: show Aim (3), Aim Smooth (10), 1 Hit (6), No Recoil (8)
+            show = (i == 3 || i == 10 || i == 6 || i == 8);
         } else if (g_selectedTab == 1) {
             // ESP/Vision tab: show ESP (4), Wallhack (9)
             show = (i == 4 || i == 9);
@@ -1317,6 +1317,20 @@ static void updateRowStates(void) {
             }
         }
         setSwitchState(9, wallhackOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Aim Smooth 100% Auto (Button 10)
+        static id s_keyAimSmooth = NULL;
+        if (strCls && !s_keyAimSmooth) {
+            s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+        }
+        BOOL aimSmoothOn = NO;
+        if (defsCls && s_keyAimSmooth) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                aimSmoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyAimSmooth);
+            }
+        }
+        setSwitchState(10, aimSmoothOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
     }
 }
 
@@ -1505,11 +1519,18 @@ static void setupMenuUI(id win, id panel) {
             ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnWallhack);
             g_coreBtns[9] = btnWallhack;
         }
+        // 10: Aim Smooth 100% (Auto Aim)
+        id btnAimSmooth = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btnAimSmooth) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btnAimSmooth, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAimSmooth:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnAimSmooth);
+            g_coreBtns[10] = btnAimSmooth;
+        }
     }
 
-    // 3. Size and style the main panel (280 width x 516 height)
+    // 3. Size and style the main panel (280 width x 558 height)
     double panelW = 280.0;
-    double panelH = 516.0;
+    double panelH = 558.0;
     CGRect pFrame = ((msgSend_rect)objc_msgSend)(panel, sel("frame"));
     pFrame.size.width = panelW;
     pFrame.size.height = panelH;
@@ -1712,7 +1733,8 @@ static void setupMenuUI(id win, id panel) {
         "1 Hit Kill VIP",
         "Speed Epic VIP",
         "No Recoil 100% VIP",
-        "Wallhack VIP"
+        "Wallhack VIP",
+        "Aim Smooth (Auto Aim)"
     };
 
     double startY = 84.0;
@@ -1864,6 +1886,83 @@ static inline void safePyDecref(void *obj) {
             if (dealloc) dealloc(obj);
         }
     }
+}
+
+static BOOL runCombatPython(const char *cmd) {
+    if (!cmd) return NO;
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    BOOL foundCore = NO;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            foundCore = YES;
+            break;
+        }
+    }
+    if (!foundCore) return NO;
+
+    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
+    if (!pCombatReady || *pCombatReady != 1) return NO;
+
+    void **pCombatDict = (void **)(coreSlide + 0xc168);
+    if (!pCombatDict || !(*pCombatDict)) return NO;
+
+    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
+    void **pPyErrClear = (void **)(coreSlide + 0xc110);
+    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
+    void **pPyRunString = (void **)(coreSlide + 0xc138);
+
+    if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
+        !pPyGILStateRelease || !*pPyGILStateRelease ||
+        !pPyRunString || !*pPyRunString) {
+        return NO;
+    }
+
+    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
+    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
+    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
+
+    int gstate = PyGILState_Ensure();
+    void *dict = *pCombatDict;
+    BOOL ok = NO;
+    if (dict) {
+        void *res = PyRun_String(cmd, 257 /* Py_single_input */, dict, dict);
+        if (res) {
+            safePyDecref(res);
+            ok = YES;
+        }
+        if (PyErr_Clear) PyErr_Clear();
+    }
+    PyGILState_Release(gstate);
+    return ok;
+}
+
+// Aim Smooth 100% Auto (Button 10)
+static void toggleAimSmooth_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    char pyCmd[128];
+    snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", newState ? "True" : "False");
+    runCombatPython(pyCmd);
+
+    printf("[FlyMenuUI] Aim Smooth 100%% Auto toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 // Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
@@ -2318,6 +2417,24 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
             updateRowStates();
         }
 
+        // Periodically ensure Python combat module is synced with Aim Smooth setting
+        if (tickCount % 20 == 0) {
+            Class defsCls = cls("NSUserDefaults");
+            if (defsCls) {
+                id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+                Class strCls = cls("NSString");
+                if (defs && strCls) {
+                    id k = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+                    if (k) {
+                        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), k);
+                        char pyCmd[128];
+                        snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", cur ? "True" : "False");
+                        runCombatPython(pyCmd);
+                    }
+                }
+            }
+        }
+
         // Keep floating logo, open menu, and ESP overlay properly ordered on top
         if (tickCount % 20 == 0) {
             if (g_espOverlay) {
@@ -2448,6 +2565,7 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");
@@ -2457,6 +2575,7 @@ static void initFlyMenuUI(void) {
     } else {
         uiMgrCls = cls("ROSUIManager");
         if (uiMgrCls) {
+            class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");

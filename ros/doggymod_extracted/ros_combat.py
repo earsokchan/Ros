@@ -26,6 +26,7 @@ Timer = getattr(_fly, 'Timer', None) if _fly else None
 _movement = getattr(_fly, '_movement', None) if _fly else None
 _esp = False
 _aim = False
+_aim_smooth = False
 _esp_state = 0
 _aim_state = 0
 _timer = None
@@ -236,29 +237,33 @@ def _stop_timer():
 
 
 def handle(action):
-    global _esp, _aim, _esp_state, _aim_state, _last_error, _target_id
+    global _esp, _aim, _aim_smooth, _esp_state, _aim_state, _last_error, _target_id
     try:
         if action == 'esp':
             _esp = not _esp
             _esp_state = 1 if _esp else 0
             if not _esp:
                 _write_esp_file('')
-                if not _aim:
+                if not _aim and not _aim_smooth:
                     _clear_frame()
         elif action == 'aim':
             _aim = not _aim
             _aim_state = 1 if _aim else 0
             _target_id = None
-            if not _aim and not _esp:
+            if not _aim and not _aim_smooth and not _esp:
+                _clear_frame()
+        elif action == 'aim_smooth':
+            _aim_smooth = not _aim_smooth
+            if not _aim and not _aim_smooth and not _esp:
                 _clear_frame()
         elif action == 'off':
-            _esp = _aim = False
+            _esp = _aim = _aim_smooth = False
             _esp_state = _aim_state = 0
             _clear_frame()
         else:
             raise ValueError('Unknown combat request')
         _last_error = ''
-        if _esp or _aim:
+        if _esp or _aim or _aim_smooth:
             _ensure_timer()
         else:
             _stop_timer()
@@ -269,16 +274,31 @@ def handle(action):
         return True
 
 
+def set_aim_smooth(val):
+    global _aim_smooth, _last_error
+    try:
+        _aim_smooth = bool(val)
+        if _aim_smooth or _esp or _aim:
+            _ensure_timer()
+        else:
+            _stop_timer()
+            _clear_frame()
+        return _aim_smooth
+    except Exception as error:
+        _last_error = '%s: %s' % (type(error).__name__, error)
+        return False
+
+
 def _tick():
     global _last_tick, _owner, _target_id, _frame, _rich_esp_frame, _frame_time
     global _esp_state, _aim_state, _last_error, _last_skip, _waiting, _ticks, _scanned, _skipped
-    global _fire_held, _aim_writes, _last_angles, _esp, _aim, _last_esp_str
+    global _fire_held, _aim_writes, _last_angles, _esp, _aim, _aim_smooth, _last_esp_str
     now = time.time()
     previous_tick = _last_tick
     _last_tick = now
     _ticks += 1
     try:
-        if not (_esp or _aim):
+        if not (_esp or _aim or _aim_smooth):
             _clear_frame()
             _stop_timer()
             return
@@ -354,7 +374,7 @@ def _tick():
         _frame = tuple((c[2], c[3], False) for c in esp_candidates[:_max_lines]) if _esp else ()
         _frame_time = now
         selected = None
-        if _aim:
+        if _aim or _aim_smooth:
             input_go = getattr(Globals, 'userInput', None)
             if input_go is None:
                 raise Waiting('Waiting for Globals.userInput')
@@ -370,7 +390,9 @@ def _tick():
             if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
                 _aim_state = 3
                 _fire_held = False
-            if not _fire_held:
+            # Aim Smooth auto-aims 100% of the time without requiring fire button!
+            should_aim = _aim_smooth or _fire_held
+            if not should_aim:
                 _target_id = None
             else:
                 control = camera.GetComponent('PlayerCameraController')
@@ -389,7 +411,7 @@ def _tick():
                         pass
                     else:
                         pool = retained + [c for c in pool if c[1] != retained[0][1]]
-                # Visibility is recomputed while firing; pick closest visible enemy
+                # Visibility is recomputed while firing/aiming; pick closest visible enemy
                 for candidate in pool[:12]:
                     if _visible(Physics, RaycastHit, camera_position, candidate[4]):
                         selected = candidate
@@ -404,9 +426,22 @@ def _tick():
                         _target_id = None
                     else:
                         yaw, pitch = _angle_offset(selected[5], forward)
-                        _last_angles = (yaw, pitch)
-                        # Same rotation API/Vector2(yaw,pitch) used by ShootAssist.
-                        control.onRotateCamera(Vector2(yaw, pitch), True)
+                        if _aim_smooth and not _fire_held:
+                            # 100% Auto Aim Smooth: glide crosshair smoothly towards target without clicking shoot
+                            smooth_yaw = max(-14.0, min(14.0, yaw * 0.32))
+                            smooth_pitch = max(-9.0, min(9.0, pitch * 0.32))
+                            _last_angles = (smooth_yaw, smooth_pitch)
+                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                        elif _aim_smooth and _fire_held:
+                            # User clicked shoot: higher tracking response
+                            smooth_yaw = max(-24.0, min(24.0, yaw * 0.60))
+                            smooth_pitch = max(-16.0, min(16.0, pitch * 0.60))
+                            _last_angles = (smooth_yaw, smooth_pitch)
+                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                        else:
+                            # Instant lock when Aimbot 360 Lock is used alone
+                            _last_angles = (yaw, pitch)
+                            control.onRotateCamera(Vector2(yaw, pitch), True)
                         _aim_writes += 1
                         _aim_state = 5
                         _target_id = selected[1]
@@ -472,7 +507,7 @@ def _tick():
 
 def snapshot():
     global _esp_state, _aim_state, _last_error
-    if (_esp or _aim) and (_timer is None or time.time() - _last_tick > 3.0):
+    if (_esp or _aim or _aim_smooth) and (_timer is None or time.time() - _last_tick > 3.0):
         try:
             _stop_timer()
             _ensure_timer()
