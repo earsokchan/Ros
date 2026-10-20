@@ -12,10 +12,18 @@ def _write_esp_file(content):
 
 _fly = sys.modules.get('ros_fly_mod')
 if _fly is None:
-    raise RuntimeError('The existing Fly controller must load first')
-Globals = _fly.Globals
-Timer = _fly.Timer
-_movement = _fly._movement
+    try:
+        import ros_fly_mod as _fly
+    except Exception:
+        pass
+if _fly is None:
+    try:
+        import ros_fly as _fly
+    except Exception:
+        pass
+Globals = getattr(_fly, 'Globals', None) if _fly else None
+Timer = getattr(_fly, 'Timer', None) if _fly else None
+_movement = getattr(_fly, '_movement', None) if _fly else None
 _esp = False
 _aim = False
 _esp_state = 0

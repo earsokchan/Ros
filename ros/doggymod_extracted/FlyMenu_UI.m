@@ -1835,10 +1835,7 @@ static void setupMenuUI(id win, id panel) {
 static inline void safePyDecref(void *obj) {
     if (!obj) return;
     int64_t *ref = (int64_t *)obj;
-    if (*ref > 1) {
-        (*ref)--;
-    } else if (*ref == 1) {
-        *ref = 0;
+    if (--(*ref) == 0) {
         void *tp = *((void **)obj + 1);
         if (tp) {
             void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
@@ -1871,11 +1868,17 @@ static char *getESPSnapshot(void) {
     void **pCombatDict = (void **)(coreSlide + 0xc168);
     if (!pCombatDict || !(*pCombatDict)) return NULL;
 
+    // Validated BSS pointers from FlyMenu_core.dylib:
+    // 0xc0f0: _gil (PyGILState_Ensure)
+    // 0xc110: _clearError (PyErr_Clear)
+    // 0xc118: _releaseGil (PyGILState_Release)
+    // 0xc138: _runString (PyRun_String)
+    // 0xc150: _stringData (PyString_AsString)
     void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
-    void **pPyGILStateRelease = (void **)(coreSlide + 0xc110);
+    void **pPyErrClear = (void **)(coreSlide + 0xc110);
+    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
     void **pPyRunString = (void **)(coreSlide + 0xc138);
     void **pPyStringAsString = (void **)(coreSlide + 0xc150);
-    void **pPyErrClear = (void **)(coreSlide + 0xc118);
 
     if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
         !pPyGILStateRelease || !*pPyGILStateRelease ||
@@ -1884,13 +1887,13 @@ static char *getESPSnapshot(void) {
         return NULL;
     }
 
-    void *(*PyGILState_Ensure)(void) = (void *(*)(void))*pPyGILStateEnsure;
-    void (*PyGILState_Release)(void *) = (void (*)(void *))*pPyGILStateRelease;
+    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
+    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
     void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
     char *(*PyString_AsString)(void *) = (char *(*)(void *))*pPyStringAsString;
     void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
 
-    void *gstate = PyGILState_Ensure();
+    int gstate = PyGILState_Ensure();
     char *resultCopy = NULL;
     void *dict = *pCombatDict;
 
@@ -1929,7 +1932,22 @@ static char *getESPSnapshot(void) {
 }
 
 static void ensureESPOverlay(id win) {
-    if (g_espOverlay || !win) return;
+    if (!win) return;
+    if (g_espOverlay) {
+        id sView = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
+        if (!sView) {
+            ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
+            if (g_panel) {
+                id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+                if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
+            }
+            if (g_floatBtn) {
+                id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
+                if (fSuper) ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
+            }
+        }
+        return;
+    }
 
     Class uiView = cls("UIView");
     if (!uiView) return;
@@ -2030,7 +2048,15 @@ static void ensureESPOverlay(id win) {
         }
     }
 
-    ((msgSend_void_id_long)objc_msgSend)(win, sel("insertSubview:atIndex:"), overlay, 0);
+    ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), overlay);
+    if (g_panel) {
+        id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+        if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
+    }
+    if (g_floatBtn) {
+        id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
+        if (fSuper) ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
+    }
     g_espOverlay = overlay;
 }
 
