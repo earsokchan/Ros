@@ -1234,7 +1234,7 @@ static void updateRowStates(void) {
         if (g_coreBtns[4]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            espOn = (strstr(s, "ON") != NULL || strstr(s, "WAIT") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL));
+            espOn = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL);
         }
         setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1832,93 +1832,83 @@ static void setupMenuUI(id win, id panel) {
     ensureFloatingButtonOnWindow(win);
 }
 
-// Extract rich ESP snapshot string directly from ros_combat_mod in Python engine
-// Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
-// Extract rich ESP snapshot string safely from Python engine with fallback support
-static char *getESPSnapshot(void) {
-    uintptr_t slide = _dyld_get_image_vmaddr_slide(0);
-    int (*Py_IsInitialized)(void) = (int (*)(void))(slide + 0x101d05a24);
-
-    void *(*PyGILState_Ensure)(void) = (void *(*)(void))(slide + 0x101d05158);
-    void (*PyGILState_Release)(void *) = (void (*)(void *))(slide + 0x101d051dc);
-    void *(*PyImport_AddModule)(const char *) = (void *(*)(const char *))(slide + 0x101cf8fd4);
-    void *(*PyModule_GetDict)(void *) = (void *(*)(void *))(slide + 0x101c79884);
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))(slide + 0x101d0689c);
-    char *(*PyString_AsString)(void *) = (char *(*)(void *))(slide + 0x101c845f4);
-    void (*PyErr_Clear)(void) = (void (*)(void))(slide + 0x101cf17f0);
-
-    // Fallback pointers from FlyMenu_core.dylib memory if main slide is different
-    if (!Py_IsInitialized || !Py_IsInitialized()) {
-        uint32_t count = _dyld_image_count();
-        for (uint32_t i = 0; i < count; i++) {
-            const char *name = _dyld_get_image_name(i);
-            if (name && strstr(name, "FlyMenu_core")) {
-                intptr_t coreSlide = _dyld_get_image_vmaddr_slide(i);
-                void **pPyInit = (void **)(coreSlide + 0xc0d8);
-                if (pPyInit && *pPyInit) {
-                    Py_IsInitialized = (int (*)(void))*pPyInit;
-                    PyGILState_Ensure = (void *(*)(void))*(void **)(coreSlide + 0xc0f0);
-                    PyGILState_Release = (void (*)(void *))*(void **)(coreSlide + 0xc110);
-                    PyImport_AddModule = (void *(*)(const char *))*(void **)(coreSlide + 0xc0f8);
-                    PyModule_GetDict = (void *(*)(void *))*(void **)(coreSlide + 0xc100);
-                    PyRun_String = (void *(*)(const char *, int, void *, void *))*(void **)(coreSlide + 0xc138);
-                    PyString_AsString = (char *(*)(void *))*(void **)(coreSlide + 0xc150);
-                    PyErr_Clear = (void (*)(void))*(void **)(coreSlide + 0xc118);
-                }
-                break;
-            }
+static inline void safePyDecref(void *obj) {
+    if (!obj) return;
+    int64_t *ref = (int64_t *)obj;
+    if (*ref > 1) {
+        (*ref)--;
+    } else if (*ref == 1) {
+        *ref = 0;
+        void *tp = *((void **)obj + 1);
+        if (tp) {
+            void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
+            if (dealloc) dealloc(obj);
         }
     }
+}
 
-    if (!Py_IsInitialized || !Py_IsInitialized()) return NULL;
-    if (!PyGILState_Ensure || !PyGILState_Release || !PyRun_String || !PyString_AsString) return NULL;
+// Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
+static char *getESPSnapshot(void) {
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    BOOL foundCore = NO;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            foundCore = YES;
+            break;
+        }
+    }
+    if (!foundCore) return NULL;
+
+    // Check if FlyMenu_core's combat engine has successfully initialized and is ready
+    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
+    if (!pCombatReady || *pCombatReady != 1) {
+        return NULL; // Zero-risk: return NULL immediately while game is booting or ESP is off
+    }
+
+    void **pCombatDict = (void **)(coreSlide + 0xc168);
+    if (!pCombatDict || !(*pCombatDict)) return NULL;
+
+    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
+    void **pPyGILStateRelease = (void **)(coreSlide + 0xc110);
+    void **pPyRunString = (void **)(coreSlide + 0xc138);
+    void **pPyStringAsString = (void **)(coreSlide + 0xc150);
+    void **pPyErrClear = (void **)(coreSlide + 0xc118);
+
+    if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
+        !pPyGILStateRelease || !*pPyGILStateRelease ||
+        !pPyRunString || !*pPyRunString ||
+        !pPyStringAsString || !*pPyStringAsString) {
+        return NULL;
+    }
+
+    void *(*PyGILState_Ensure)(void) = (void *(*)(void))*pPyGILStateEnsure;
+    void (*PyGILState_Release)(void *) = (void (*)(void *))*pPyGILStateRelease;
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
+    char *(*PyString_AsString)(void *) = (char *(*)(void *))*pPyStringAsString;
+    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
 
     void *gstate = PyGILState_Ensure();
     char *resultCopy = NULL;
-
-    void *mod = PyImport_AddModule ? PyImport_AddModule("ros_combat_mod") : NULL;
-    void *dict = (mod && PyModule_GetDict) ? PyModule_GetDict(mod) : NULL;
-
-    if (!dict) {
-        // Fallback: check dict pointer directly from FlyMenu_core memory
-        uint32_t count = _dyld_image_count();
-        for (uint32_t i = 0; i < count; i++) {
-            const char *name = _dyld_get_image_name(i);
-            if (name && strstr(name, "FlyMenu_core")) {
-                intptr_t coreSlide = _dyld_get_image_vmaddr_slide(i);
-                void **pCombatDict = (void **)(coreSlide + 0xc168);
-                if (pCombatDict && *pCombatDict) {
-                    dict = *pCombatDict;
-                }
-                break;
-            }
-        }
-    }
+    void *dict = *pCombatDict;
 
     if (dict) {
-        // 1. First try rich esp_snapshot()
+        // 1. First try rich esp_snapshot() (Py_eval_input = 258)
         void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
         if (res) {
             char *s = PyString_AsString(res);
             if (s && *s && strcmp(s, "NONE") != 0) {
                 resultCopy = strdup(s);
             }
-            int64_t *ref = (int64_t *)res;
-            if (*ref == 1) {
-                *ref = 0;
-                void *tp = *((void **)res + 1);
-                if (tp) {
-                    void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
-                    if (dealloc) dealloc(res);
-                }
-            } else if (*ref > 1) {
-                (*ref)--;
-            }
-        } else if (PyErr_Clear) {
+            safePyDecref(res);
+        }
+        if (PyErr_Clear) {
             PyErr_Clear();
         }
 
-        // 2. Fallback to standard snapshot() if esp_snapshot was empty or pending
+        // 2. Fallback to standard snapshot() if esp_snapshot was empty or "NONE"
         if (!resultCopy) {
             void *res2 = PyRun_String("snapshot()", 258 /* Py_eval_input */, dict, dict);
             if (res2) {
@@ -1926,18 +1916,9 @@ static char *getESPSnapshot(void) {
                 if (s2 && *s2 && strcmp(s2, "NONE") != 0) {
                     resultCopy = strdup(s2);
                 }
-                int64_t *ref2 = (int64_t *)res2;
-                if (*ref2 == 1) {
-                    *ref2 = 0;
-                    void *tp2 = *((void **)res2 + 1);
-                    if (tp2) {
-                        void (*dealloc)(void *) = *(void **)((uintptr_t)tp2 + 0x30);
-                        if (dealloc) dealloc(res2);
-                    }
-                } else if (*ref2 > 1) {
-                    (*ref2)--;
-                }
-            } else if (PyErr_Clear) {
+                safePyDecref(res2);
+            }
+            if (PyErr_Clear) {
                 PyErr_Clear();
             }
         }
@@ -2058,12 +2039,12 @@ static void updateESPOverlay(id win) {
     ensureESPOverlay(win);
     if (!g_espOverlay) return;
 
-    // Check if ESP is ON in core button (handling ON, WAIT, or any active non-OFF state)
+    // Check if ESP is ON in core button (strictly :ON or :WAIT)
     BOOL espActive = NO;
     if (g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        espActive = (strstr(s, "ON") != NULL || strstr(s, "WAIT") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL));
+        espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL);
     }
 
     if (!espActive) {
