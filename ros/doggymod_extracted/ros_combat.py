@@ -181,92 +181,260 @@ def _enemy(go, player, service):
     except Exception:
         return False
 
+_weapon_debug = ''  # diagnostic string for weapon detection state
+
+
 def _is_using_gun(player, local_entity):
     """
-    Returns False when the player is running with bare hands (unarmed/empty hands),
-    holding melee (pan, crowbar), or holding throwables (grenades).
-    Returns True when holding a firearm (gun).
+    Detect if player is holding a firearm (gun) vs bare hands / melee / throwables.
+    Uses dynamic runtime introspection (dir()) to discover actual NeoX attribute names
+    rather than relying on hardcoded guesses that may not exist.
+    Returns False = bare hands/melee (no aim lock), True = gun (aim lock).
     """
+    global _weapon_debug
     try:
         if local_entity is None and player is None:
+            _weapon_debug = 'no_objs->True'
             return True
 
-        for obj in (local_entity, player):
+        # ===== STRATEGY 1: Dynamic introspection on entity / player =====
+        # Enumerate dir() to find actual weapon-related attributes at runtime
+        for obj_label, obj in (('entity', local_entity), ('player', player)):
             if obj is None:
                 continue
+            try:
+                attrs = dir(obj)
+            except Exception:
+                continue
+            for attr_name in attrs:
+                lower = attr_name.lower()
+                if lower.startswith('__'):
+                    continue
 
-            # 1. Explicit unarmed / fist boolean indicators
-            for attr in ('is_unarmed', 'isUnarmed', 'is_fist', 'isFist', 'bare_hand', 'bareHand'):
-                val = getattr(obj, attr, None)
-                if val is not None:
+                # --- Detect unarmed / fist / barehand flags ---
+                if any(kw in lower for kw in ('unarmed', 'fist', 'barehand', 'bare_hand', 'noweapon', 'no_weapon')):
                     try:
-                        if bool(val() if callable(val) else val):
+                        val = getattr(obj, attr_name, None)
+                        if val is None:
+                            continue
+                        if callable(val):
+                            val = val()
+                        if bool(val):
+                            _weapon_debug = '%s.%s=True->False' % (obj_label, attr_name)
                             return False
                     except Exception:
                         pass
 
-            # 2. Check bag equip slot from bag / inventory:
-            # In ROS NeoX: 0 = unarmed / bare hands, 1 = primary 1, 2 = primary 2, 3 = pistol, 4 = melee (pan), 5 = grenade
-            for bag_attr in ('bag', 'inventory', 'bag_comp', 'weapon_mgr'):
-                bag = getattr(obj, bag_attr, None)
-                if bag is not None:
-                    for slot_attr in ('cur_equip_pos', 'curEquipPos', 'cur_pos', 'curPos', 'cur_weapon_pos', 'cur_slot', 'get_cur_equip_pos', 'getCurEquipPos'):
-                        pos = getattr(bag, slot_attr, None)
-                        if pos is not None:
-                            try:
-                                pos_int = int(pos() if callable(pos) else pos)
-                                if pos_int == 0:
-                                    # 0 = Bare hands / running holstered
-                                    return False
-                                if pos_int in (4, 5):
-                                    # 4 = Melee (pan), 5 = Grenade
-                                    return False
-                                if pos_int in (1, 2, 3):
-                                    # 1, 2, 3 = Firearms (guns)
-                                    return True
-                            except Exception:
-                                pass
-
-            # 3. Check active weapon instance or weapon name
-            for w_attr in ('cur_weapon', 'curWeapon', 'weapon', 'current_weapon', 'hold_weapon', 'holdWeapon'):
-                w = getattr(obj, w_attr, None)
-                if w is not None:
-                    if callable(w):
-                        try:
-                            w = w()
-                        except Exception:
-                            w = None
-                    if w is None:
-                        continue
-                    w_name = str(getattr(w, 'name', '') or getattr(w, 'weapon_name', '') or getattr(w, 'desc', '') or '').lower()
-                    if w_name:
-                        # Melee or fists or grenades
-                        if any(term in w_name for term in ('fist', 'bare', 'unarm', 'hand', 'melee', 'pan', 'crowbar', 'chicken', 'stick', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
+                # --- Detect equip position (slot number) ---
+                if 'equip' in lower and 'pos' in lower:
+                    try:
+                        val = getattr(obj, attr_name, None)
+                        if val is None:
+                            continue
+                        if callable(val):
+                            val = val()
+                        pos_int = int(val)
+                        if pos_int == 0:
+                            _weapon_debug = '%s.%s=%d->False(bare)' % (obj_label, attr_name, pos_int)
                             return False
+                        if pos_int in (4, 5):
+                            _weapon_debug = '%s.%s=%d->False(melee/nade)' % (obj_label, attr_name, pos_int)
+                            return False
+                        if pos_int in (1, 2, 3):
+                            _weapon_debug = '%s.%s=%d->True(gun)' % (obj_label, attr_name, pos_int)
+                            return True
+                    except Exception:
+                        pass
+
+                # --- Detect current weapon reference ---
+                if ('weapon' in lower or 'gun' in lower) and \
+                   any(kw in lower for kw in ('cur', 'hold', 'active', 'equip', 'using', 'select', 'current')):
+                    try:
+                        val = getattr(obj, attr_name, None)
+                        if val is None:
+                            _weapon_debug = '%s.%s=None->False' % (obj_label, attr_name)
+                            return False
+                        if callable(val):
+                            val = val()
+                        if val is None or val is False or val == 0:
+                            _weapon_debug = '%s.%s=%s->False' % (obj_label, attr_name, val)
+                            return False
+                        # Has a weapon reference - check if melee/grenade
+                        w_name = ''
+                        for n_attr in ('name', 'weapon_name', 'desc', 'weaponName'):
+                            w_name = str(getattr(val, n_attr, '') or '').lower()
+                            if w_name:
+                                break
+                        if w_name and any(t in w_name for t in ('fist', 'bare', 'unarm', 'hand', 'melee', 'pan', 'crowbar', 'grenade', 'smoke', 'bomb', 'flash')):
+                            _weapon_debug = '%s.%s.name=%s->False' % (obj_label, attr_name, w_name)
+                            return False
+                        _weapon_debug = '%s.%s=obj->True' % (obj_label, attr_name)
                         return True
-                    # Check bullet attributes - guns have bullets
-                    for b_attr in ('bullet_count', 'clip_bullet', 'cur_bullet', 'max_bullet', 'magazine', 'ammo'):
-                        if hasattr(w, b_attr):
-                            return True
+                    except Exception:
+                        pass
 
-            # 4. Check weapon ID
-            for id_attr in ('cur_weapon_id', 'curWeaponId', 'weapon_id', 'weaponId', 'hold_weapon_id'):
-                wid = getattr(obj, id_attr, None)
-                if wid is not None:
+                # --- Detect weapon ID ---
+                if 'weapon' in lower and 'id' in lower:
                     try:
-                        wid_val = int(wid() if callable(wid) else wid)
-                        if wid_val == 0:
-                            # 0 = No weapon / bare hands
+                        val = getattr(obj, attr_name, None)
+                        if val is None:
+                            continue
+                        if callable(val):
+                            val = val()
+                        wid = int(val)
+                        if wid == 0:
+                            _weapon_debug = '%s.%s=0->False' % (obj_label, attr_name)
                             return False
-                        if wid_val > 0:
-                            # Positive weapon ID
+                        if wid > 0:
+                            _weapon_debug = '%s.%s=%d->True' % (obj_label, attr_name, wid)
                             return True
                     except Exception:
                         pass
 
-        # Default to True so holding guns will never fail to lock
+            # --- Check sub-objects (bag, inventory, weapon_mgr) ---
+            for sub_attr_name in attrs:
+                sub_lower = sub_attr_name.lower()
+                if sub_lower.startswith('__'):
+                    continue
+                if any(kw in sub_lower for kw in ('bag', 'inventory', 'weapon_mgr', 'weaponmgr', 'equip_mgr', 'equipmgr')):
+                    try:
+                        sub_obj = getattr(obj, sub_attr_name, None)
+                        if sub_obj is None or callable(sub_obj):
+                            continue
+                        sub_attrs = dir(sub_obj)
+                        for sa in sub_attrs:
+                            sa_lower = sa.lower()
+                            if sa_lower.startswith('__'):
+                                continue
+                            # Equip pos in sub-object
+                            if 'equip' in sa_lower and 'pos' in sa_lower:
+                                try:
+                                    sv = getattr(sub_obj, sa, None)
+                                    if sv is None:
+                                        continue
+                                    if callable(sv):
+                                        sv = sv()
+                                    p = int(sv)
+                                    if p == 0:
+                                        _weapon_debug = '%s.%s.%s=%d->False' % (obj_label, sub_attr_name, sa, p)
+                                        return False
+                                    if p in (4, 5):
+                                        _weapon_debug = '%s.%s.%s=%d->False' % (obj_label, sub_attr_name, sa, p)
+                                        return False
+                                    if p in (1, 2, 3):
+                                        _weapon_debug = '%s.%s.%s=%d->True' % (obj_label, sub_attr_name, sa, p)
+                                        return True
+                                except Exception:
+                                    pass
+                            # Weapon reference in sub-object
+                            if ('weapon' in sa_lower or 'gun' in sa_lower) and \
+                               any(kw in sa_lower for kw in ('cur', 'hold', 'active', 'select', 'current')):
+                                try:
+                                    sv = getattr(sub_obj, sa, None)
+                                    if sv is None:
+                                        _weapon_debug = '%s.%s.%s=None->False' % (obj_label, sub_attr_name, sa)
+                                        return False
+                                    if callable(sv):
+                                        sv = sv()
+                                    if sv is None or sv is False or sv == 0:
+                                        _weapon_debug = '%s.%s.%s=%s->False' % (obj_label, sub_attr_name, sa, sv)
+                                        return False
+                                    _weapon_debug = '%s.%s.%s=obj->True' % (obj_label, sub_attr_name, sa)
+                                    return True
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+        # ===== STRATEGY 2: Check InputInterpred for fire button visibility =====
+        # When bare-handed in ROS, the fire button is hidden / shoot mode is off
+        try:
+            Globals = sys.modules.get('Globals')
+            if Globals is not None:
+                input_go = getattr(Globals, 'userInput', None)
+                if input_go is not None:
+                    gc = getattr(input_go, 'GetComponent', None)
+                    if callable(gc):
+                        ic = gc('InputInterpred')
+                        if ic is not None:
+                            ic_attrs = dir(ic)
+                            for ic_attr in ic_attrs:
+                                ic_lower = ic_attr.lower()
+                                if ic_lower.startswith('__'):
+                                    continue
+                                # Look for shoot mode / fire button visible / weapon active
+                                if any(kw in ic_lower for kw in ('shootmode', 'shoot_mode', 'gunmode', 'gun_mode', 'weaponactive', 'weapon_active', 'firebtnvisible', 'fire_btn_visible', 'canfire', 'can_fire', 'fireactive', 'fire_active', 'showcrosshair', 'show_crosshair', 'isshootmode', 'isgunmode')):
+                                    try:
+                                        iv = getattr(ic, ic_attr, None)
+                                        if iv is None:
+                                            continue
+                                        if callable(iv):
+                                            iv = iv()
+                                        if not bool(iv):
+                                            _weapon_debug = 'input.%s=%s->False' % (ic_attr, iv)
+                                            return False
+                                        else:
+                                            _weapon_debug = 'input.%s=%s->True' % (ic_attr, iv)
+                                            return True
+                                    except Exception:
+                                        pass
+        except Exception:
+            pass
+
+        # ===== STRATEGY 3: Probe shoot_utils / ShootAssist modules =====
+        try:
+            shoot = sys.modules.get('common.shoot_utils')
+            if shoot is not None:
+                for fn_name in ('isCanShoot', 'canShoot', 'is_can_shoot', 'can_shoot',
+                                'isInShootMode', 'isShootMode', 'is_shoot_mode',
+                                'hasWeapon', 'has_weapon', 'isHoldGun', 'is_hold_gun'):
+                    fn = getattr(shoot, fn_name, None)
+                    if callable(fn):
+                        try:
+                            result = fn()
+                            if result is False or result == 0:
+                                _weapon_debug = 'shoot.%s=False->False' % fn_name
+                                return False
+                            if result is True or result == 1:
+                                _weapon_debug = 'shoot.%s=True->True' % fn_name
+                                return True
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # ===== STRATEGY 4: Try player.GetComponent for weapon components =====
+        if player is not None:
+            gc = getattr(player, 'GetComponent', None)
+            if callable(gc):
+                for comp_name in ('ShootAssist', 'ShootController', 'WeaponController',
+                                  'WeaponHandler', 'GunController', 'FireController'):
+                    try:
+                        comp = gc(comp_name)
+                        if comp is not None:
+                            # Check if enabled / has weapon
+                            en = getattr(comp, 'enabled', None)
+                            if en is not None:
+                                try:
+                                    en_val = bool(en() if callable(en) else en)
+                                    if not en_val:
+                                        _weapon_debug = 'comp.%s.enabled=False->False' % comp_name
+                                        return False
+                                    _weapon_debug = 'comp.%s.enabled=True->True' % comp_name
+                                    return True
+                                except Exception:
+                                    pass
+                            # Component exists and is presumably active
+                            _weapon_debug = 'comp.%s=exists->True' % comp_name
+                            return True
+                    except Exception:
+                        pass
+
+        # No detection matched - default True so guns always work
+        _weapon_debug = 'default->True'
         return True
     except Exception:
+        _weapon_debug = 'exception->True'
         return True
 
 
@@ -700,15 +868,18 @@ def esp_snapshot():
 
 
 def diagnostics():
-    return ('ESP/Aim build 10\nESP state: %d / Aim state: %d\n'
+    return ('ESP/Aim build 11\nESP state: %d / Aim state: %d\n'
             'Timer ticks: %d / objects checked: %d\n'
             'Lines: %d / skipped objects: %d\n'
             'Fire held: %s / target: %s\nCamera requests: %d\n'
             'Last yaw/pitch: %.2f / %.2f degrees\n'
             'Capture/retain: 28 / 38 degrees\n'
+            'Weapon detect: %s\n'
             'Waiting: %s\nLast skipped object: %s\nError: %s' % (_esp_state, _aim_state, _ticks, _scanned,
              len(_frame), _skipped, _fire_held, _target_id, _aim_writes,
-             _last_angles[0], _last_angles[1], _waiting or '(none)',
+             _last_angles[0], _last_angles[1],
+             _weapon_debug or '(none)',
+             _waiting or '(none)',
              _last_skip or '(none)', _last_error or '(none)'))
 
 
