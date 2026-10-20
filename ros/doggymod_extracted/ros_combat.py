@@ -34,6 +34,7 @@ _owner = None
 _target_id = None
 _frame = ()
 _rich_esp_frame = ()
+_last_esp_str = 'NONE'
 _frame_time = 0.0
 _last_error = ''
 _last_skip = ''
@@ -192,9 +193,10 @@ def _extract_real_name(entity, go):
 
 
 def _clear_frame():
-    global _frame, _rich_esp_frame, _frame_time, _target_id, _fire_held
+    global _frame, _rich_esp_frame, _frame_time, _target_id, _fire_held, _last_esp_str
     _frame = ()
     _rich_esp_frame = ()
+    _last_esp_str = 'NONE'
     _frame_time = 0.0
     _target_id = None
     _fire_held = False
@@ -205,7 +207,7 @@ def _ensure_timer():
     global _timer, _last_tick
     if _timer is None:
         try:
-            _timer = Timer.addRepeatTimer(0.03333, _tick)
+            _timer = Timer.addRepeatTimer(0.01666, _tick)
             _last_tick = time.time()
         except Exception:
             pass
@@ -259,7 +261,7 @@ def handle(action):
 def _tick():
     global _last_tick, _owner, _target_id, _frame, _rich_esp_frame, _frame_time
     global _esp_state, _aim_state, _last_error, _last_skip, _waiting, _ticks, _scanned, _skipped
-    global _fire_held, _aim_writes, _last_angles, _esp, _aim
+    global _fire_held, _aim_writes, _last_angles, _esp, _aim, _last_esp_str
     now = time.time()
     previous_tick = _last_tick
     _last_tick = now
@@ -270,12 +272,8 @@ def _tick():
             _stop_timer()
             return
         _clear_previous_target = _target_id
-        _clear_frame()
-        _esp_state = 2 if _esp else 0
-        _aim_state = 2 if _aim else 0
-        if now < previous_tick or now - previous_tick > 0.75:
-            _waiting = 'Resuming engine callbacks'
-            return
+        _esp_state = 1 if _esp else 0
+        _aim_state = 1 if _aim else 0
         ownership = _fly._target()
         if ownership is None:
             _waiting = 'Waiting for local character'
@@ -419,23 +417,18 @@ def _tick():
 
                 rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
             _rich_esp_frame = tuple(rich_items)
+            _last_esp_str = ';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items) if rich_items else 'NONE'
             _frame = tuple((c[2], c[3], bool(cs_i)) for c in esp_candidates[:_max_lines])
-            _write_esp_file(';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items))
+            _write_esp_file(_last_esp_str if _last_esp_str != 'NONE' else '')
         else:
             _rich_esp_frame = ()
+            _last_esp_str = 'NONE'
             _frame = ()
             _write_esp_file('')
         _frame_time = now
     except Waiting as error:
         _waiting = str(error)
         _target_id = None
-        # Preserve ESP when only aim's input/controller is unavailable.
-        if _esp_state != 1:
-            _frame = ()
-            _rich_esp_frame = ()
-            _frame_time = 0.0
-            _esp_state = 2 if _esp else 0
-            _write_esp_file('')
         _aim_state = 2 if _aim else 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
@@ -446,20 +439,15 @@ def _tick():
 
 def snapshot():
     global _esp_state, _aim_state, _last_error
-    # ASCII integers only. Normalised screen coordinates are independent of
-    # Retina scale. UIKit must discard stale frames, never draw old enemies.
-    if (_esp or _aim) and (_timer is None or time.time() - _last_tick > 1.0):
-        # Scene changes can discard the engine registry while a handle remains.
+    if (_esp or _aim) and (_timer is None or time.time() - _last_tick > 3.0):
         try:
             _stop_timer()
             _ensure_timer()
         except Exception as error:
-            handle('off')
-            _esp_state = _aim_state = 4
             _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
             return '10,4,4,0'
     age = time.time() - _frame_time
-    fresh = 0.0 <= age <= 0.85
+    fresh = 0.0 <= age <= 3.0
     rows = _frame if fresh and _esp else ()
     if not _esp:
         esp_state = 0
@@ -477,23 +465,13 @@ def snapshot():
 
 
 def esp_snapshot():
-    global _esp_state, _aim_state, _last_error
+    global _esp, _last_esp_str, _frame_time
     if not _esp:
-        return "NONE"
+        return 'NONE'
     age = time.time() - _frame_time
-    if age < 0.0 or age > 0.85:
-        return "NONE"
-    try:
-        if not _rich_esp_frame:
-            return "NONE"
-        parts = []
-        for item in _rich_esp_frame:
-            parts.append('%d,%d,%d,%d,%d,%d,%d,%d,%s' % item)
-        if not parts:
-            return "NONE"
-        return ';'.join(parts)
-    except Exception:
-        return "NONE"
+    if age < 0.0 or age > 3.0:
+        return 'NONE'
+    return _last_esp_str or 'NONE'
 
 
 def diagnostics():

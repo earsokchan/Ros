@@ -2065,12 +2065,12 @@ static void updateESPOverlay(id win) {
     ensureESPOverlay(win);
     if (!g_espOverlay) return;
 
-    // Check if ESP is ON in core button (strictly :ON or :WAIT)
+    // Check if ESP is ON in core button
     BOOL espActive = NO;
     if (g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL);
+        espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strstr(s, "ERROR") == NULL && strlen(s) > 3));
     }
 
     if (!espActive) {
@@ -2085,17 +2085,22 @@ static void updateESPOverlay(id win) {
     }
 
     char *snapStr = getESPSnapshot();
+    static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
-        if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
-        if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
-        if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
-        if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
-        for (int i = 0; i < MAX_ESP_LABELS; i++) {
-            if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+        s_emptyFrames++;
+        if (s_emptyFrames > 15) {
+            if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
+            if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
+            if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
+            if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
+            for (int i = 0; i < MAX_ESP_LABELS; i++) {
+                if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+            }
         }
         if (snapStr) free(snapStr);
         return;
     }
+    s_emptyFrames = 0;
 
     Class caTrans = cls("CATransaction");
     if (caTrans) {
@@ -2241,6 +2246,8 @@ static void updateESPOverlay(id win) {
     free(snapStr);
 }
 
+static BOOL s_hasDisplayLink = NO;
+
 static void timerTick_imp(id self, SEL _cmd, id timer) {
     static int tickCount = 0;
     tickCount++;
@@ -2307,8 +2314,19 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
         }
     }
 
-    // 3. Render rich ESP overlay smoothly
-    updateESPOverlay(win);
+    // 3. Render rich ESP overlay smoothly (fallback if CADisplayLink is not present)
+    if (!s_hasDisplayLink) {
+        updateESPOverlay(win);
+    }
+}
+
+static void displayLinkTick_imp(id self, SEL _cmd, id sender) {
+    @autoreleasepool {
+        id win = getActiveWindow();
+        if (win) {
+            updateESPOverlay(win);
+        }
+    }
 }
 
 __attribute__((constructor))
@@ -2395,6 +2413,7 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleMenu:"), (IMP)toggleMenu_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("closeMenu:"), (IMP)closeMenu_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("timerTick:"), (IMP)timerTick_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("displayLinkTick:"), (IMP)displayLinkTick_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("selectTab:"), (IMP)selectTab_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleOneHit:"), (IMP)toggleOneHit_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
@@ -2471,6 +2490,17 @@ static void initFlyMenuUI(void) {
             s_armed = YES;
             printf("[FlyMenuUI] UI timer successfully armed\n");
             timerTick_imp(g_uiMgr, sel("timerTick:"), timer);
+
+            // Arm CADisplayLink for 60/120 FPS ultra-smooth V-SYNC ESP line tracking
+            Class caDisplayLinkCls = cls("CADisplayLink");
+            if (caDisplayLinkCls) {
+                id dLink = ((id (*)(id, SEL, id, SEL))objc_msgSend)((id)caDisplayLinkCls, sel("displayLinkWithTarget:selector:"), g_uiMgr, sel("displayLinkTick:"));
+                if (dLink) {
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(dLink, sel("addToRunLoop:forMode:"), mainLoop, commonMode);
+                    s_hasDisplayLink = YES;
+                    printf("[FlyMenuUI] CADisplayLink successfully armed for 60/120 FPS smooth ESP tracking\n");
+                }
+            }
         }
     };
 
