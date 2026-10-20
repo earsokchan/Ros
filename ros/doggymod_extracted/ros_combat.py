@@ -183,51 +183,46 @@ def _enemy(go, player, service):
 
 def _is_using_gun(player, local_entity):
     """
-    Returns False ONLY if definitely unarmed (bare fists), holding melee (pan),
-    or holding throwables (grenades).
-    Defaults to True so Aim Smooth reliably locks onto enemies when using guns.
+    Returns True ONLY if the player is actively holding a firearm (Rifle, SMG, Sniper, Shotgun, Pistol).
+    Returns False if bare hands / empty fists, running holstered, melee (pan), or throwables (grenades).
     """
     try:
         if local_entity is None and player is None:
-            return True
+            return False
 
+        # 1. Check explicit unarmed / fist boolean indicators on local_entity or player
         for obj in (local_entity, player):
             if obj is None:
                 continue
-
-            # 1. Explicit unarmed / fist boolean indicators
-            for attr in ('is_unarmed', 'isUnarmed', 'is_fist', 'isFist', 'bare_hand', 'bareHand'):
+            for attr in ('is_unarmed', 'isUnarmed', 'is_fist', 'isFist', 'bare_hand', 'bareHand', 'is_bare_hands'):
                 val = getattr(obj, attr, None)
                 if val is not None:
                     try:
-                        res = bool(val() if callable(val) else val)
-                        if res:
+                        if bool(val() if callable(val) else val):
                             return False
                     except Exception:
                         pass
 
-            # 2. Check active weapon instance or weapon name
-            for w_attr in ('cur_weapon', 'curWeapon', 'weapon', 'current_weapon', 'hold_weapon', 'holdWeapon'):
-                w = getattr(obj, w_attr, None)
-                if w is not None:
-                    if callable(w):
-                        try:
-                            w = w()
-                        except Exception:
-                            w = None
-                    if w is None:
-                        continue
-                    w_name = str(getattr(w, 'name', '') or getattr(w, 'weapon_name', '') or getattr(w, 'desc', '') or '').lower()
-                    if w_name:
-                        if any(term in w_name for term in ('fist', 'bare', 'unarm', 'hand', 'melee', 'pan', 'crowbar', 'chicken', 'stick', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
+        # 2. Check if entity is currently holding ANY weapon via boolean methods
+        for obj in (local_entity, player):
+            if obj is None:
+                continue
+            for fn_name in ('is_holding_weapon', 'isHoldingWeapon', 'is_hold_weapon', 'isHoldWeapon', 'is_armed', 'isArmed'):
+                fn = getattr(obj, fn_name, None)
+                if fn is not None:
+                    try:
+                        val = fn() if callable(fn) else fn
+                        # If explicitly False, player has empty hands (holstered/unarmed)
+                        if val is False or val == 0:
                             return False
-                        return True
-                    # Check bullet attributes - guns have bullets
-                    for b_attr in ('bullet_count', 'clip_bullet', 'cur_bullet', 'max_bullet', 'magazine', 'ammo'):
-                        if hasattr(w, b_attr):
-                            return True
+                    except Exception:
+                        pass
 
-            # 3. Check equip slot from bag / inventory:
+        # 3. Check bag / equip slot if available
+        # In ROS: 0=unarmed/bare hands, 1=primary 1, 2=primary 2, 3=pistol, 4=melee (pan), 5=throwables (grenade)
+        for obj in (local_entity, player):
+            if obj is None:
+                continue
             for bag_attr in ('bag', 'inventory', 'bag_comp', 'weapon_mgr'):
                 bag = getattr(obj, bag_attr, None)
                 if bag is not None:
@@ -235,15 +230,110 @@ def _is_using_gun(player, local_entity):
                         pos = getattr(bag, slot_attr, None)
                         if pos is not None:
                             try:
-                                pos_int = int(pos)
-                                if pos_int in (4, 5):  # Melee (pan) or grenade in ROS
+                                pos_int = int(pos() if callable(pos) else pos)
+                                if pos_int == 0:
+                                    # 0 = Holstered / Bare hands
                                     return False
+                                if pos_int in (4, 5):
+                                    # 4 = Melee (pan), 5 = Grenade
+                                    return False
+                                if pos_int in (1, 2, 3):
+                                    # 1, 2, 3 = Firearms
+                                    return True
                             except Exception:
                                 pass
 
-        return True
+        # 4. Check active weapon instance on local_entity or player
+        weapon = None
+        for obj in (local_entity, player):
+            if obj is None:
+                continue
+            for w_name in ('cur_weapon', 'curWeapon', 'weapon', 'current_weapon', 'hold_weapon', 'holdWeapon', 'active_weapon'):
+                w = getattr(obj, w_name, None)
+                if w is not None:
+                    if callable(w):
+                        try:
+                            w = w()
+                        except Exception:
+                            w = None
+                    if w is not None:
+                        weapon = w
+                        break
+            if weapon is not None:
+                break
+            for fn_name in ('get_cur_weapon', 'getCurWeapon', 'get_weapon', 'getWeapon', 'get_hold_weapon'):
+                fn = getattr(obj, fn_name, None)
+                if callable(fn):
+                    try:
+                        w = fn()
+                        if w:
+                            weapon = w
+                            break
+                    except Exception:
+                        pass
+            if weapon is not None:
+                break
+
+        # 5. If an active weapon instance is found, inspect it
+        if weapon is not None:
+            # Check for melee or throwable flags
+            for melee_attr in ('is_melee', 'isMelee', 'is_throwable', 'isThrowable'):
+                m_val = getattr(weapon, melee_attr, None)
+                if m_val is not None:
+                    try:
+                        if bool(m_val() if callable(m_val) else m_val):
+                            return False
+                    except Exception:
+                        pass
+
+            # Check weapon name string for fists, melee, or grenades
+            w_name = str(getattr(weapon, 'name', '') or getattr(weapon, 'weapon_name', '') or getattr(weapon, 'desc', '') or '').lower()
+            if w_name:
+                if any(k in w_name for k in ('fist', 'bare', 'unarm', 'hand', 'none', 'null')):
+                    return False
+                if any(k in w_name for k in ('melee', 'pan', 'crowbar', 'chicken', 'stick', 'dagger', 'katana')):
+                    return False
+                if any(k in w_name for k in ('grenade', 'smoke', 'bomb', 'flash', 'molotov', 'throw')):
+                    return False
+
+            # Check explicit is_gun flag / method
+            for gun_attr in ('is_gun', 'isGun', 'is_firearm', 'isFirearm'):
+                g_val = getattr(weapon, gun_attr, None)
+                if g_val is not None:
+                    try:
+                        if bool(g_val() if callable(g_val) else g_val):
+                            return True
+                    except Exception:
+                        pass
+
+            # Check bullet/ammo attributes - only firearms have bullets / magazines
+            for bullet_attr in ('bullet_count', 'bulletCount', 'clip_bullet', 'clipBullet', 'cur_bullet', 'curBullet', 'max_bullet', 'maxBullet', 'magazine', 'ammo', 'ammo_count', 'ammoCount'):
+                if hasattr(weapon, bullet_attr):
+                    return True
+
+            # If weapon object exists and is not fist/melee/grenade, it is a gun
+            return True
+
+        # 6. Check weapon ID on local_entity or player
+        for obj in (local_entity, player):
+            if obj is None:
+                continue
+            for id_attr in ('cur_weapon_id', 'curWeaponId', 'weapon_id', 'weaponId', 'hold_weapon_id'):
+                wid = getattr(obj, id_attr, None)
+                if wid is not None:
+                    try:
+                        wid_val = int(wid() if callable(wid) else wid)
+                        if wid_val <= 0:
+                            # 0 = No weapon held (bare hands)
+                            return False
+                        return True
+                    except Exception:
+                        pass
+
+        # If no weapon object or gun slot is detected, player is bare-handed / unarmed
+        return False
     except Exception:
-        return True
+        return False
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
