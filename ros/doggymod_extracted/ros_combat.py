@@ -336,7 +336,7 @@ def _ensure_timer():
     global _timer, _last_tick
     if _timer is None:
         try:
-            _timer = Timer.addRepeatTimer(0.01666, _tick)
+            _timer = Timer.addRepeatTimer(0.010, _tick)
             _last_tick = time.time()
         except Exception:
             pass
@@ -522,19 +522,28 @@ def _tick():
                     raise Waiting('Unsupported live camera controller')
                 # Prioritize closest enemy to player character (20m before 100m)
                 pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
-                retained = [c for c in candidates if c[1] == _clear_previous_target
-                            and c[0] <= _retain_degrees and not c[8]]
-                if retained:
-                    # If another enemy is much closer than the retained target, switch to the closer threat
-                    if pool and pool[0][7] < retained[0][7] * 0.5:
-                        pass
-                    else:
-                        pool = retained + [c for c in pool if c[1] != retained[0][1]]
-                # Visibility is recomputed while firing/aiming; pick closest visible enemy
-                for candidate in pool[:12]:
+                # When shooting, retain locked target so sprays remain consistent on the target
+                if _fire_held and _clear_previous_target is not None:
+                    retained = [c for c in pool if c[1] == _clear_previous_target]
+                    if retained:
+                        pool = retained + [c for c in pool if c[1] != _clear_previous_target]
+
+                # Immediate lock: Pass 1 finds closest visible enemy via direct physics raycast
+                selected = None
+                for candidate in pool[:10]:
                     if _visible(Physics, RaycastHit, camera_position, candidate[4]):
                         selected = candidate
                         break
+                # Pass 2: if direct raycast fails (e.g. grass, leaves, fence, window), lock onto closest enemy on screen
+                if selected is None:
+                    for candidate in pool[:8]:
+                        if candidate[9] or candidate[0] <= 80.0:
+                            selected = candidate
+                            break
+                # Pass 3: fallback to closest pool enemy
+                if selected is None and pool:
+                    selected = pool[0]
+
                 if selected is not None:
                     # Check player validity before the camera request.
                     latest_player = getattr(Globals, 'player', None)
@@ -545,16 +554,38 @@ def _tick():
                         _target_id = None
                     else:
                         yaw, pitch = _angle_offset(selected[5], forward)
+                        abs_yaw = abs(yaw)
+                        abs_pitch = abs(pitch)
                         if _aim_smooth and using_gun and not _fire_held:
-                            # 100% Auto Aim Smooth: glide crosshair smoothly towards target without clicking shoot
-                            smooth_yaw = max(-14.0, min(14.0, yaw * 0.32))
-                            smooth_pitch = max(-9.0, min(9.0, pitch * 0.32))
+                            # Fast, responsive Aim Smooth: quick snap & smooth tracking without lag/delay
+                            if abs_yaw <= 2.5 and abs_pitch <= 2.0:
+                                smooth_yaw = yaw
+                                smooth_pitch = pitch
+                            else:
+                                step_yaw = max(4.0, min(38.0, abs_yaw * 0.70))
+                                step_pitch = max(2.5, min(24.0, abs_pitch * 0.70))
+                                smooth_yaw = step_yaw if yaw > 0 else -step_yaw
+                                smooth_pitch = step_pitch if pitch > 0 else -step_pitch
+                                if abs(smooth_yaw) > abs_yaw:
+                                    smooth_yaw = yaw
+                                if abs(smooth_pitch) > abs_pitch:
+                                    smooth_pitch = pitch
                             _last_angles = (smooth_yaw, smooth_pitch)
                             control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                         elif _aim_smooth and using_gun and _fire_held:
-                            # User clicked shoot: higher tracking response
-                            smooth_yaw = max(-24.0, min(24.0, yaw * 0.60))
-                            smooth_pitch = max(-16.0, min(16.0, pitch * 0.60))
+                            # High-speed responsive lock when shooting
+                            if abs_yaw <= 3.5 and abs_pitch <= 3.0:
+                                smooth_yaw = yaw
+                                smooth_pitch = pitch
+                            else:
+                                step_yaw = max(6.0, min(50.0, abs_yaw * 0.85))
+                                step_pitch = max(4.0, min(32.0, abs_pitch * 0.85))
+                                smooth_yaw = step_yaw if yaw > 0 else -step_yaw
+                                smooth_pitch = step_pitch if pitch > 0 else -step_pitch
+                                if abs(smooth_yaw) > abs_yaw:
+                                    smooth_yaw = yaw
+                                if abs(smooth_pitch) > abs_pitch:
+                                    smooth_pitch = pitch
                             _last_angles = (smooth_yaw, smooth_pitch)
                             control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                         else:
