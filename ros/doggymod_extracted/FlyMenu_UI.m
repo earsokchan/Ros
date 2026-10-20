@@ -166,6 +166,9 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
     if (docPathObj) {
         const char *cPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
         if (cPath) {
+            if (access(cPath, R_OK) == 0) {
+                return docPathObj;
+            }
             FILE *f = fopen(cPath, "wb");
             if (f) {
                 fwrite(data, 1, len, f);
@@ -224,7 +227,7 @@ static id getActiveWindow(void) {
     return NULL;
 }
 
-// Suppress and remove on-screen UI from ROS.deb (SCLAlertView, FPSDisplay, caidan / menuView1)
+// Suppress and remove on-screen UI from ROS.deb (caidan / menuView1, FPSDisplay)
 // while keeping DLG and DoggyMod VIP Menu 100% visible and functional.
 static id dummyReturnNil(id self, SEL _cmd, ...) { return NULL; }
 static void dummyNoOp(id self, SEL _cmd, ...) {}
@@ -239,76 +242,14 @@ static void suppressROSDebUI(void) {
         if (mCaidanCls) method_setImplementation(mCaidanCls, (IMP)dummyNoOp);
     }
 
-    // 2. Neuter ROS.deb SCLAlertView popups so they never show on screen
-    Class sclCls = cls("SCLAlertView");
-    if (sclCls) {
-        Method mShow = class_getInstanceMethod(sclCls, sel("showTitle:image:color:title:subTitle:duration:completeText:style:"));
-        if (mShow) method_setImplementation(mShow, (IMP)dummyReturnNil);
-        Method mInit = class_getInstanceMethod(sclCls, sel("initWithNewWindowWidth:"));
-        if (mInit) method_setImplementation(mInit, (IMP)dummyReturnNil);
-    }
-
-    // 3. Neuter ROS.deb FPSDisplay label
+    // 2. Neuter ROS.deb FPSDisplay label without returning nil from shareFPSDisplay
     Class fpsCls = cls("FPSDisplay");
     if (fpsCls) {
-        Method mFpsShare = class_getClassMethod(fpsCls, sel("shareFPSDisplay"));
-        if (mFpsShare) method_setImplementation(mFpsShare, (IMP)dummyReturnNil);
         Method mFpsInit = class_getInstanceMethod(fpsCls, sel("initDisplayLabel"));
         if (mFpsInit) method_setImplementation(mFpsInit, (IMP)dummyNoOp);
         Method mFpsLink = class_getInstanceMethod(fpsCls, sel("initCADisplayLink"));
         if (mFpsLink) method_setImplementation(mFpsLink, (IMP)dummyNoOp);
     }
-
-    // 4. Neuter toast messages from ROS.deb
-    Class uiView = cls("UIView");
-    if (uiView) {
-        Method mToast = class_getInstanceMethod(uiView, sel("makeToast:duration:position:title:image:style:completion:"));
-        if (mToast) method_setImplementation(mToast, (IMP)dummyNoOp);
-    }
-}
-
-static BOOL isRealDLGView(id v) {
-    if (!v) return NO;
-    if (((BOOL (*)(id, SEL, SEL))objc_msgSend)(v, sel("respondsToSelector:"), sel("btnConsole"))) {
-        id btn = ((id (*)(id, SEL))objc_msgSend)(v, sel("btnConsole"));
-        if (btn) {
-            id t = ((id (*)(id, SEL, long))objc_msgSend)(btn, sel("titleForState:"), 0);
-            if (t) {
-                const char *utf = (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String"));
-                if (utf && (strstr(utf, "LZz") != NULL || strstr(utf, "lzz") != NULL || strstr(utf, "DLG") != NULL)) {
-                    return YES; // Keep user's DLG untouched!
-                }
-            }
-            id bg = ((id (*)(id, SEL, long))objc_msgSend)(btn, sel("backgroundImageForState:"), 0);
-            id img = ((id (*)(id, SEL, long))objc_msgSend)(btn, sel("imageForState:"), 0);
-            if (bg || img) {
-                return NO; // ROS.deb logo!
-            }
-        }
-    }
-    id subviews = ((id (*)(id, SEL))objc_msgSend)(v, sel("subviews"));
-    if (subviews) {
-        long count = (long)((long (*)(id, SEL))objc_msgSend)(subviews, sel("count"));
-        Class btnCls = cls("UIButton");
-        for (long i = 0; i < count; i++) {
-            id sub = ((msgSend_id_long)objc_msgSend)(subviews, sel("objectAtIndex:"), i);
-            if (sub && btnCls && (long)((long (*)(id, SEL, id))objc_msgSend)(sub, sel("isKindOfClass:"), (id)btnCls)) {
-                id t = ((id (*)(id, SEL, long))objc_msgSend)(sub, sel("titleForState:"), 0);
-                if (t) {
-                    const char *utf = (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String"));
-                    if (utf && (strstr(utf, "LZz") != NULL || strstr(utf, "lzz") != NULL || strstr(utf, "DLG") != NULL)) {
-                        return YES; // Keep user's DLG untouched!
-                    }
-                }
-                id bg = ((id (*)(id, SEL, long))objc_msgSend)(sub, sel("backgroundImageForState:"), 0);
-                id img = ((id (*)(id, SEL, long))objc_msgSend)(sub, sel("imageForState:"), 0);
-                if (bg || img) {
-                    return NO; // ROS.deb logo!
-                }
-            }
-        }
-    }
-    return NO;
 }
 
 static void purgeROSDebViews(void) {
@@ -321,52 +262,13 @@ static void purgeROSDebViews(void) {
         *pMenuView = NULL;
     }
 
-    // 2. Scan all windows for any ROS.deb views (SCLAlertView, SCLSwitchView, FPSDisplay, and ros.dylib's DLG logo view)
-    Class uiApp = cls("UIApplication");
-    if (!uiApp) return;
-    id app = ((id (*)(id, SEL))objc_msgSend)((id)uiApp, sel("sharedApplication"));
-    if (!app) return;
-    id windows = ((id (*)(id, SEL))objc_msgSend)(app, sel("windows"));
-    if (!windows) return;
-    long winCount = (long)((long (*)(id, SEL))objc_msgSend)(windows, sel("count"));
-    for (long w = 0; w < winCount; w++) {
-        id win = ((msgSend_id_long)objc_msgSend)(windows, sel("objectAtIndex:"), w);
-        if (!win) continue;
-        id subviews = ((id (*)(id, SEL))objc_msgSend)(win, sel("subviews"));
-        if (!subviews) continue;
-        long count = (long)((long (*)(id, SEL))objc_msgSend)(subviews, sel("count"));
-        for (long i = count - 1; i >= 0; i--) {
-            id v = ((msgSend_id_long)objc_msgSend)(subviews, sel("objectAtIndex:"), i);
-            if (!v || v == g_panel || v == g_floatBtn || v == g_espOverlay) continue;
-
-            const char *cname = object_getClassName(v);
-            if (!cname) continue;
-
-            // Check if this is a DLG view: keep LZz DLG visible, purge ROS.deb floating logo icon!
-            if (strstr(cname, "DLG") != NULL || strstr(cname, "dlg") != NULL) {
-                if (isRealDLGView(v)) {
-                    // USER'S DLG (LZz): KEEP 100% VISIBLE AND FUNCTIONAL!
-                    continue;
-                } else {
-                    // THIS IS ROS.deb FLOATING LOGO ICON: PURGE FROM SCREEN!
-                    ((msgSend_void_long)objc_msgSend)(v, sel("setHidden:"), 1);
-                    ((msgSend_void_double)objc_msgSend)(v, sel("setAlpha:"), 0.0);
-                    ((msgSend_void_rect)objc_msgSend)(v, sel("setFrame:"), CGRectMake(-10000, -10000, 0, 0));
-                    id vLayer = ((id (*)(id, SEL))objc_msgSend)(v, sel("layer"));
-                    if (vLayer) {
-                        ((msgSend_void_long)objc_msgSend)(vLayer, sel("setHidden:"), 1);
-                        ((msgSend_void_double)objc_msgSend)(vLayer, sel("setOpacity:"), 0.0);
-                    }
-                    ((id (*)(id, SEL))objc_msgSend)(v, sel("removeFromSuperview"));
-                    continue;
-                }
-            }
-
-            // Only remove UI specifically belonging to ROS.deb
-            if (strncmp(cname, "SCL", 3) == 0 || strstr(cname, "FPSDisplay") != NULL) {
-                ((msgSend_void_long)objc_msgSend)(v, sel("setHidden:"), 1);
-                ((id (*)(id, SEL))objc_msgSend)(v, sel("removeFromSuperview"));
-            }
+    // 2. Hide any stray FPSDisplay instances if allocated
+    Class fpsCls = cls("FPSDisplay");
+    if (fpsCls) {
+        id fpsInst = ((id (*)(id, SEL))objc_msgSend)((id)fpsCls, sel("shareFPSDisplay"));
+        if (fpsInst) {
+            ((msgSend_void_long)objc_msgSend)(fpsInst, sel("setHidden:"), 1);
+            ((id (*)(id, SEL))objc_msgSend)(fpsInst, sel("removeFromSuperview"));
         }
     }
 }
@@ -624,18 +526,44 @@ static void closeMenu_imp(id self, SEL _cmd, id sender) {
     ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 1);
 }
 
-// VIP Memory feature synchronization
-static volatile int32_t g_vipScanActive = 0;
-
-// Native UISwitch sender helper for ros.dylib memory features
 static BOOL swIsOn_fallback(id self, SEL _cmd) {
     return YES;
 }
 
+static Class g_toggleSwitchCls = Nil;
+
+static BOOL toggleSw_isOn(id self, SEL _cmd) {
+    id val = objc_getAssociatedObject(self, "on");
+    return (val != NULL);
+}
+
+static void toggleSw_setOn(id self, SEL _cmd, BOOL on) {
+    objc_setAssociatedObject(self, "on", on ? (id)(uintptr_t)1 : NULL, OBJC_ASSOCIATION_ASSIGN);
+}
+
+static dispatch_queue_t getVIPQueue(void) {
+    static dispatch_queue_t q = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        q = dispatch_queue_create("com.doggymod.vipqueue", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
 static id getSwitchSender(BOOL state) {
-    Class swCls = cls("UISwitch");
-    if (swCls) {
-        id inst = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)swCls, sel("alloc")), sel("init"));
+    if (!g_toggleSwitchCls) {
+        g_toggleSwitchCls = cls("ROSToggleSwitch");
+    }
+    if (g_toggleSwitchCls) {
+        id inst = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)g_toggleSwitchCls, sel("alloc")), sel("init"));
+        if (inst) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(inst, sel("setOn:"), state);
+            return inst;
+        }
+    }
+    Class sw = cls("UISwitch");
+    if (sw) {
+        id inst = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)sw, sel("alloc")), sel("init"));
         if (inst) {
             ((void (*)(id, SEL, BOOL))objc_msgSend)(inst, sel("setOn:"), state);
             return inst;
@@ -696,11 +624,8 @@ static void toggleOneHit_imp(id self, SEL _cmd, id sender) {
     ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
     updateRowStates();
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
-            triggerTweakFeature("feature7:", "sw7", newState);
-            g_vipScanActive = 0;
-        }
+    dispatch_async(getVIPQueue(), ^{
+        triggerTweakFeature("feature7:", "sw7", newState);
     });
 
     printf("[FlyMenuUI] 1 Hit Kill VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
@@ -725,11 +650,8 @@ static void toggleSpeedEpic_imp(id self, SEL _cmd, id sender) {
     ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
     updateRowStates();
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
-            triggerTweakFeature("feature6:", "sw6", newState);
-            g_vipScanActive = 0;
-        }
+    dispatch_async(getVIPQueue(), ^{
+        triggerTweakFeature("feature6:", "sw6", newState);
     });
 
     printf("[FlyMenuUI] Speed Epic VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
@@ -754,12 +676,9 @@ static void toggleNoRecoil_imp(id self, SEL _cmd, id sender) {
     ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
     updateRowStates();
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
-            triggerTweakFeature("feature2:", "sw2", newState);
-            triggerTweakFeature("feature4:", "sw4", newState);
-            g_vipScanActive = 0;
-        }
+    dispatch_async(getVIPQueue(), ^{
+        triggerTweakFeature("feature2:", "sw2", newState);
+        triggerTweakFeature("feature4:", "sw4", newState);
     });
 
     printf("[FlyMenuUI] No Recoil 100%% VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
@@ -784,11 +703,8 @@ static void toggleWallhack_imp(id self, SEL _cmd, id sender) {
     ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
     updateRowStates();
 
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
-        if (OSAtomicCompareAndSwap32(0, 1, &g_vipScanActive)) {
-            triggerTweakFeature("feature1:", "sw1", newState);
-            g_vipScanActive = 0;
-        }
+    dispatch_async(getVIPQueue(), ^{
+        triggerTweakFeature("feature1:", "sw1", newState);
     });
 
     printf("[FlyMenuUI] Wallhack VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
@@ -893,119 +809,117 @@ static void setSwitchState(int idx, BOOL on, id onPillBg, id offPillBg, id white
 
 // Update pill colors, knob positions & button card borders based on real core engine state
 static void updateRowStates(void) {
-    Class uiColor = cls("UIColor");
-    if (!uiColor) return;
+    @autoreleasepool {
+        Class uiColor = cls("UIColor");
+        if (!uiColor) return;
 
-    id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
-    id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.15, 0.15, 0.18, 1.0);
-    id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
-    id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
-    id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.14, 0.14, 0.18, 1.0);
-    id darkBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.08, 0.08, 0.11, 1.0);
-    id knobOffColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.50, 0.55, 1.0);
+        id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+        id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.15, 0.15, 0.18, 1.0);
+        id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
+        id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
+        id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.14, 0.14, 0.18, 1.0);
+        id darkBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.08, 0.08, 0.11, 1.0);
+        id knobOffColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.50, 0.55, 1.0);
 
-    // Keep native button title text hidden so only our clean UI shows
-    for (int i = 0; i < NUM_BUTTONS; i++) {
-        id btn = g_coreBtns[i];
-        if (btn) {
-            id tLbl = ((id (*)(id, SEL))objc_msgSend)(btn, sel("titleLabel"));
-            if (tLbl) {
-                ((msgSend_void_double)objc_msgSend)(tLbl, sel("setAlpha:"), 0.0);
-            }
-            if (darkBg) {
-                ((msgSend_void_id)objc_msgSend)(btn, sel("setBackgroundColor:"), darkBg);
-            }
-        }
-    }
-
-    // Fly State (Button 0)
-    BOOL flyOn = NO;
-    if (g_coreBtns[0]) {
-        id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[0], sel("titleForState:"), 0);
-        const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        flyOn = (strstr(s, "ON") != NULL || strstr(s, "STOP") != NULL);
-    }
-    setSwitchState(0, flyOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
-
-    // Aim State (Button 3)
-    BOOL aimOn = NO;
-    if (g_coreBtns[3]) {
-        id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
-        const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        aimOn = (strstr(s, "ON") != NULL || strstr(s, "LOCK") != NULL);
-    }
-    setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
-
-    // ESP State (Button 4)
-    BOOL espOn = NO;
-    if (g_coreBtns[4]) {
-        id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
-        const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        espOn = (strstr(s, "ON") != NULL);
-    }
-    setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
-
-    // Info button (Button 5)
-    if (g_rowPills[5]) {
-        ((msgSend_void_id)objc_msgSend)(g_rowPills[5], sel("setBackgroundColor:"), offPillBg);
-    }
-
-    // 1 Hit Kill VIP (Button 6)
-    BOOL oneHitOn = NO;
-    Class defsCls = cls("NSUserDefaults");
-    if (defsCls) {
-        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-        if (defs) {
-            Class strCls = cls("NSString");
-            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw7");
-            if (key) {
-                oneHitOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        // Keep native button title text hidden so only our clean UI shows
+        for (int i = 0; i < NUM_BUTTONS; i++) {
+            id btn = g_coreBtns[i];
+            if (btn) {
+                id tLbl = ((id (*)(id, SEL))objc_msgSend)(btn, sel("titleLabel"));
+                if (tLbl) {
+                    ((msgSend_void_double)objc_msgSend)(tLbl, sel("setAlpha:"), 0.0);
+                }
+                if (darkBg) {
+                    ((msgSend_void_id)objc_msgSend)(btn, sel("setBackgroundColor:"), darkBg);
+                }
             }
         }
-    }
-    setSwitchState(6, oneHitOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
-    // Speed Epic VIP (Button 7)
-    BOOL speedOn = NO;
-    if (defsCls) {
-        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-        if (defs) {
-            Class strCls = cls("NSString");
-            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
-            if (key) {
-                speedOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        // Fly State (Button 0)
+        BOOL flyOn = NO;
+        if (g_coreBtns[0]) {
+            id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[0], sel("titleForState:"), 0);
+            const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
+            flyOn = (strstr(s, "ON") != NULL || strstr(s, "STOP") != NULL);
+        }
+        setSwitchState(0, flyOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Aim State (Button 3)
+        BOOL aimOn = NO;
+        if (g_coreBtns[3]) {
+            id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
+            const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
+            aimOn = (strstr(s, "ON") != NULL || strstr(s, "LOCK") != NULL);
+        }
+        setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // ESP State (Button 4)
+        BOOL espOn = NO;
+        if (g_coreBtns[4]) {
+            id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
+            const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
+            espOn = (strstr(s, "ON") != NULL);
+        }
+        setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Info button (Button 5)
+        if (g_rowPills[5]) {
+            ((msgSend_void_id)objc_msgSend)(g_rowPills[5], sel("setBackgroundColor:"), offPillBg);
+        }
+
+        static id s_keySw7 = NULL;
+        static id s_keySw6 = NULL;
+        static id s_keySw2 = NULL;
+        static id s_keySw1 = NULL;
+        Class strCls = cls("NSString");
+        if (strCls) {
+            if (!s_keySw7) s_keySw7 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw7");
+            if (!s_keySw6) s_keySw6 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
+            if (!s_keySw2) s_keySw2 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw2");
+            if (!s_keySw1) s_keySw1 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw1");
+        }
+
+        // 1 Hit Kill VIP (Button 6)
+        BOOL oneHitOn = NO;
+        Class defsCls = cls("NSUserDefaults");
+        if (defsCls && s_keySw7) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                oneHitOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySw7);
             }
         }
-    }
-    setSwitchState(7, speedOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+        setSwitchState(6, oneHitOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
-    // No Recoil 100% VIP (Button 8)
-    BOOL recoilOn = NO;
-    if (defsCls) {
-        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-        if (defs) {
-            Class strCls = cls("NSString");
-            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw2");
-            if (key) {
-                recoilOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        // Speed Epic VIP (Button 7)
+        BOOL speedOn = NO;
+        if (defsCls && s_keySw6) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                speedOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySw6);
             }
         }
-    }
-    setSwitchState(8, recoilOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+        setSwitchState(7, speedOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
-    // Wallhack VIP (Button 9)
-    BOOL wallhackOn = NO;
-    if (defsCls) {
-        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-        if (defs) {
-            Class strCls = cls("NSString");
-            id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw1");
-            if (key) {
-                wallhackOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        // No Recoil 100% VIP (Button 8)
+        BOOL recoilOn = NO;
+        if (defsCls && s_keySw2) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                recoilOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySw2);
             }
         }
+        setSwitchState(8, recoilOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Wallhack VIP (Button 9)
+        BOOL wallhackOn = NO;
+        if (defsCls && s_keySw1) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                wallhackOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySw1);
+            }
+        }
+        setSwitchState(9, wallhackOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
     }
-    setSwitchState(9, wallhackOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 }
 
 static void createFloatingLogoButton(id win) {
@@ -1110,6 +1024,25 @@ static void setupMenuUI(id win, id panel) {
 
     // 1. Initially hide menu by default
     ((msgSend_void_long)objc_msgSend)(panel, sel("setHidden:"), 1);
+
+    // Reset VIP switch preferences safely here on main thread
+    Class defsCls = cls("NSUserDefaults");
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (defs) {
+            Class strCls = cls("NSString");
+            if (strCls) {
+                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", NULL};
+                for (int k = 0; resetKeys[k]; k++) {
+                    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), resetKeys[k]);
+                    if (key) {
+                        ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), NO, key);
+                    }
+                }
+                ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+            }
+        }
+    }
 
     // 2. Identify the 6 native core buttons from FlyMenu_core.dylib
     id subviews = ((id (*)(id, SEL))objc_msgSend)(panel, sel("subviews"));
@@ -1522,11 +1455,6 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
     static int tickCount = 0;
     tickCount++;
 
-    // Safety cleanup: run purge very infrequently (every 30s) instead of high frequency
-    if (tickCount % 300 == 0) {
-        purgeROSDebViews();
-    }
-
     id win = getActiveWindow();
     if (!win) return;
 
@@ -1633,9 +1561,21 @@ static void initFlyMenuUI(void) {
     // Suppress ROS.deb on-screen UI (caidan menuView1, SCLAlertView, FPSDisplay)
     suppressROSDebUI();
 
-    // 3. Register ROSUIManager class dynamically
+    // 3. Register ROSToggleSwitch and ROSUIManager classes dynamically
     Class superCls = cls("NSObject");
     if (!superCls) return;
+
+    Class swCls = objc_allocateClassPair(superCls, "ROSToggleSwitch", 0);
+    if (swCls) {
+        class_addMethod(swCls, sel("isOn"), (IMP)toggleSw_isOn, "B@:");
+        class_addMethod(swCls, sel("on"), (IMP)toggleSw_isOn, "B@:");
+        class_addMethod(swCls, sel("setOn:"), (IMP)toggleSw_setOn, "v@:B");
+        objc_registerClassPair(swCls);
+        g_toggleSwitchCls = swCls;
+    } else {
+        g_toggleSwitchCls = cls("ROSToggleSwitch");
+    }
+
     Class uiMgrCls = objc_allocateClassPair(superCls, "ROSUIManager", 0);
     if (uiMgrCls) {
         class_addMethod(uiMgrCls, sel("handleFloatPan:"), (IMP)handleFloatPan_imp, "v@:@");
@@ -1650,62 +1590,47 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("isOn"), (IMP)swIsOn_fallback, "B@:");
         objc_registerClassPair(uiMgrCls);
+    } else {
+        uiMgrCls = cls("ROSUIManager");
+    }
+    if (uiMgrCls && !g_uiMgr) {
         g_uiMgr = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiMgrCls, sel("alloc")), sel("init"));
     }
 
-    // 4. Safe post-launch configuration (1.5s delay to ensure UIKit is completely ready)
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // 4. Safe & fast UI initialization on the main queue
+    void (^armTimerBlock)(void) = ^{
+        static BOOL s_armed = NO;
+        if (s_armed || !g_uiMgr) return;
+
         suppressROSDebUI();
         purgeROSDebViews();
-
-        id mainBundle = ((id (*)(id, SEL))objc_msgSend)((id)cls("NSBundle"), sel("mainBundle"));
-        if (mainBundle) {
-            id bundlePath = ((id (*)(id, SEL))objc_msgSend)(mainBundle, sel("bundlePath"));
-            if (bundlePath) {
-                const char *bStr = (const char *)((id (*)(id, SEL))objc_msgSend)(bundlePath, sel("UTF8String"));
-                if (bStr) {
-                    char flyPath[1024];
-                    snprintf(flyPath, sizeof(flyPath), "%s/ros_fly.py", bStr);
-                    if (access(flyPath, R_OK) != 0) {
-                        FILE *f = fopen(flyPath, "wb");
-                        if (f) {
-                            fwrite(EMBEDDED_ROS_FLY_PY, 1, EMBEDDED_ROS_FLY_PY_LEN, f);
-                            fclose(f);
-                        }
-                    }
-                    char combatPath[1024];
-                    snprintf(combatPath, sizeof(combatPath), "%s/ros_combat.py", bStr);
-                    if (access(combatPath, R_OK) != 0) {
-                        FILE *f = fopen(combatPath, "wb");
-                        if (f) {
-                            fwrite(EMBEDDED_ROS_COMBAT_PY, 1, EMBEDDED_ROS_COMBAT_PY_LEN, f);
-                            fclose(f);
-                        }
-                    }
-                }
-            }
-        }
 
         ensureAndGetScriptPath("ros_fly.py", EMBEDDED_ROS_FLY_PY, EMBEDDED_ROS_FLY_PY_LEN);
         ensureAndGetScriptPath("ros_combat.py", EMBEDDED_ROS_COMBAT_PY, EMBEDDED_ROS_COMBAT_PY_LEN);
 
         Class nsTimer = cls("NSTimer");
-        if (!nsTimer || !g_uiMgr) return;
+        Class nsRunLoop = cls("NSRunLoop");
+        Class nsString = cls("NSString");
+        if (!nsTimer || !nsRunLoop || !nsString) return;
+
         id timer = ((msgSend_id_id_sel_id_bool)objc_msgSend)((id)nsTimer, sel("timerWithTimeInterval:target:selector:userInfo:repeats:"),
                                                             (double)0.10, g_uiMgr, sel("timerTick:"), NULL, YES);
         if (!timer) return;
-        Class nsRunLoop = cls("NSRunLoop");
-        if (!nsRunLoop) return;
         id mainLoop = ((id (*)(id, SEL))objc_msgSend)((id)nsRunLoop, sel("mainRunLoop"));
         if (!mainLoop) return;
-        Class nsString = cls("NSString");
-        id commonMode = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "kCFRunLoopCommonModes") : NULL;
+        id commonMode = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "kCFRunLoopCommonModes");
         if (commonMode) {
             ((id (*)(id, SEL, id, id))objc_msgSend)(mainLoop, sel("addTimer:forMode:"), timer, commonMode);
+            s_armed = YES;
             printf("[FlyMenuUI] UI timer successfully armed\n");
+            // Run one tick immediately to discover and hide raw core menu without waiting
+            timerTick_imp(g_uiMgr, sel("timerTick:"), timer);
         }
-    });
+    };
 
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.05 * NSEC_PER_SEC)), dispatch_get_main_queue(), armTimerBlock);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), armTimerBlock);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), armTimerBlock);
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         purgeROSDebViews();
     });

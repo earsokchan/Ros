@@ -166,8 +166,11 @@ def _clear_frame():
 def _ensure_timer():
     global _timer, _last_tick
     if _timer is None:
-        _timer = Timer.addRepeatTimer(0.03333, _tick)
-        _last_tick = time.time()
+        try:
+            _timer = Timer.addRepeatTimer(0.03333, _tick)
+            _last_tick = time.time()
+        except Exception:
+            pass
 
 
 def _stop_timer():
@@ -175,7 +178,10 @@ def _stop_timer():
     timer = _timer
     _timer = None
     if timer is not None:
-        Timer.delTimer(timer)
+        try:
+            Timer.delTimer(timer)
+        except Exception:
+            pass
 
 
 def handle(action):
@@ -186,10 +192,14 @@ def handle(action):
             _esp_state = 2 if _esp else 0
             if not _esp:
                 _write_esp_file('')
+                if not _aim:
+                    _clear_frame()
         elif action == 'aim':
             _aim = not _aim
             _aim_state = 2 if _aim else 0
             _target_id = None
+            if not _aim and not _esp:
+                _clear_frame()
         elif action == 'off':
             _esp = _aim = False
             _esp_state = _aim_state = 0
@@ -206,9 +216,9 @@ def handle(action):
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         _esp = _aim = False
-        _esp_state = _aim_state = 4
+        _esp_state = _aim_state = 0
         _clear_frame()
-        return False
+        return True
 
 
 def _tick():
@@ -427,8 +437,14 @@ def snapshot():
     age = time.time() - _frame_time
     fresh = 0.0 <= age <= 0.25
     rows = _frame if fresh and _esp else ()
-    esp_state = 2 if _esp_state == 1 and not fresh else _esp_state
-    aim_state = 2 if _aim_state in (1, 5) and not fresh else _aim_state
+    if not _esp:
+        esp_state = 0
+    else:
+        esp_state = 2 if _esp_state == 1 and not fresh else _esp_state
+    if not _aim:
+        aim_state = 0
+    else:
+        aim_state = 2 if _aim_state in (1, 5) and not fresh else _aim_state
     parts = ['10', str(esp_state), str(aim_state), str(len(rows))]
     for x, y, locked in rows:
         parts.extend((str(int(x * 10000.0 + 0.5)), str(int(y * 10000.0 + 0.5)),
