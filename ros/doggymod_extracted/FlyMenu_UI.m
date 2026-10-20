@@ -1225,7 +1225,7 @@ static void updateRowStates(void) {
         if (g_coreBtns[3]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            aimOn = (strstr(s, "ON") != NULL || strstr(s, "LOCK") != NULL);
+            aimOn = (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strstr(s, "ERROR") == NULL && strlen(s) > 3));
         }
         setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1234,7 +1234,7 @@ static void updateRowStates(void) {
         if (g_coreBtns[4]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            espOn = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL);
+            espOn = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strstr(s, "ERROR") == NULL && strlen(s) > 3));
         }
         setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 

@@ -40,8 +40,8 @@ _last_skip = ''
 _waiting = ''
 _ticks = _scanned = _skipped = _aim_writes = 0
 _fire_held = False
-_capture_degrees = 28.0
-_retain_degrees = 38.0
+_capture_degrees = 180.0
+_retain_degrees = 180.0
 _max_lines = 64
 _last_angles = (0.0, 0.0)
 
@@ -227,14 +227,14 @@ def handle(action):
     try:
         if action == 'esp':
             _esp = not _esp
-            _esp_state = 2 if _esp else 0
+            _esp_state = 1 if _esp else 0
             if not _esp:
                 _write_esp_file('')
                 if not _aim:
                     _clear_frame()
         elif action == 'aim':
             _aim = not _aim
-            _aim_state = 2 if _aim else 0
+            _aim_state = 1 if _aim else 0
             _target_id = None
             if not _aim and not _esp:
                 _clear_frame()
@@ -253,9 +253,6 @@ def handle(action):
         return True
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
-        _esp = _aim = False
-        _esp_state = _aim_state = 0
-        _clear_frame()
         return True
 
 
@@ -311,15 +308,16 @@ def _tick():
                 if not _enemy(go, player, service):
                     continue
                 point = get_point(go)
-                projected = _screen_point(camera, point, resolution, origin, forward)
-                if projected is None:
-                    continue
-                x, y, direction = projected
-                entity = go.entity
+                xyz = _xyz(point)
+                direction = tuple(a - b for a, b in zip(xyz, origin))
                 angle = _angle_between(direction, forward)
                 distance2 = sum(n * n for n in direction)
+                projected = _screen_point(camera, point, resolution, origin, forward)
+                x = projected[0] if projected is not None else -1.0
+                y = projected[1] if projected is not None else -1.0
+                entity = go.entity
                 candidates.append((angle, entity.id, x, y, point, direction,
-                                   go, distance2, bool(getattr(entity, 'invincible', False))))
+                                   go, distance2, bool(getattr(entity, 'invincible', False)), projected is not None))
             except Exception as error:
                 # A despawning or not-yet-rendered object cannot become a target.
                 _skipped += 1
@@ -328,7 +326,8 @@ def _tick():
         _esp_state = 1 if _esp else 0
         _aim_state = 1 if _aim else 0
         _waiting = ''
-        _frame = tuple((c[2], c[3], False) for c in candidates[:_max_lines]) if _esp else ()
+        esp_candidates = [c for c in candidates if c[9]]
+        _frame = tuple((c[2], c[3], False) for c in esp_candidates[:_max_lines]) if _esp else ()
         _frame_time = now
         selected = None
         if _aim:
@@ -382,7 +381,7 @@ def _tick():
                         _target_id = selected[1]
         if _esp:
             rich_items = []
-            for i, c in enumerate(candidates[:_max_lines]):
+            for i, c in enumerate(esp_candidates[:_max_lines]):
                 go = c[6]
                 point = c[4]
                 entity = getattr(go, 'entity', None)
@@ -420,7 +419,7 @@ def _tick():
 
                 rich_items.append((cs_i, lx_i, ly_i, bx_i, by_i, bw_i, bh_i, dist_m, clean_name))
             _rich_esp_frame = tuple(rich_items)
-            _frame = tuple((c[2], c[3], bool(cs_i)) for c in candidates[:_max_lines])
+            _frame = tuple((c[2], c[3], bool(cs_i)) for c in esp_candidates[:_max_lines])
             _write_esp_file(';'.join('%d,%d,%d,%d,%d,%d,%d,%d,%s' % it for it in rich_items))
         else:
             _rich_esp_frame = ()
@@ -440,15 +439,9 @@ def _tick():
         _aim_state = 2 if _aim else 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
-        _clear_frame()
-        _esp_state = 4 if _esp else 0
-        _aim_state = 4 if _aim else 0
-        _esp = _aim = False
-        _write_esp_file('')
-        try:
-            _stop_timer()
-        except Exception:
-            pass
+        _target_id = None
+        _aim_state = 2 if _aim else 0
+        _esp_state = 2 if _esp else 0
 
 
 def snapshot():
