@@ -37,7 +37,6 @@ BUILD = 'ROS-FLY-TEST-10'
 _enabled = False
 _vertical = 0
 _speed = 300.0  # Responsive vertical flight speed
-_speed_multiplier = 1.0  # Speed Epic multiplier (1.0x - 20.0x)
 _horizontal_multiplier = 1.0
 _horizontal_limit = 120.0
 _walk_api_scale = 60.0
@@ -157,12 +156,6 @@ def _boost_horizontal(unit, character, entity_id, now):
         magnitude = (vel[0] * vel[0] + vel[2] * vel[2]) ** 0.5
         _stats['walk_speed'] = magnitude
         _stats['estimated_speed'] = magnitude
-
-        # Actively multiply walk velocity when speed multiplier > 1.0
-        if _speed_multiplier > 1.0 and character is not None and magnitude > 0.001:
-            mult = min(float(_speed_multiplier), 30.0)
-            boosted = (vel[0] * mult, vel[1], vel[2] * mult)
-            _write_walk_velocity(character, boosted)
     except Exception:
         pass
 
@@ -252,53 +245,6 @@ def set_speed(value):
     _speed = value
 
 
-def set_speed_multiplier(multiplier):
-    global _speed_multiplier
-    try:
-        m = float(multiplier)
-        if m < 1.0:
-            m = 1.0
-        if m > 30.0:
-            m = 30.0
-        _speed_multiplier = m
-
-        # 1. Try game3d global speed rate
-        try:
-            g3d = sys.modules.get('game3d')
-            if g3d is None:
-                try:
-                    import game3d as g3d
-                except Exception:
-                    pass
-            if g3d and hasattr(g3d, 'set_global_speed_rate'):
-                g3d.set_global_speed_rate(m)
-        except Exception:
-            pass
-
-        # 2. Try Time.timeScale
-        try:
-            time_mod = sys.modules.get('Time')
-            if time_mod and hasattr(time_mod, 'timeScale'):
-                time_mod.timeScale = m
-        except Exception:
-            pass
-
-        if _speed_multiplier > 1.0:
-            _ensure_timer()
-        elif not _enabled:
-            _stop_timer()
-
-        print('[ROS Fly] Speed multiplier set to %.1fx' % _speed_multiplier)
-        return _speed_multiplier
-    except Exception as e:
-        print('[ROS Fly] Error setting speed multiplier: %s' % e)
-        return 1.0
-
-
-def get_speed_multiplier():
-    return _speed_multiplier
-
-
 def _target():
     player = getattr(Globals, 'player', None)
     if player is None:
@@ -321,7 +267,7 @@ def _tick():
     _last_tick = time.time()
     _stats['ticks'] += 1
     try:
-        if not _enabled and _speed_multiplier <= 1.0:
+        if not _enabled:
             _restore()
             if _state != 4:
                 _state = 0
@@ -335,8 +281,7 @@ def _tick():
             if was_flying:
                 _enabled = False
                 _state = 0
-                if _speed_multiplier <= 1.0:
-                    _stop_timer()
+                _stop_timer()
             else:
                 _state = 2
             return
@@ -347,25 +292,18 @@ def _tick():
             _enabled = False
             _vertical = 0
             _state = 0
-            if _speed_multiplier <= 1.0:
-                _stop_timer()
+            _stop_timer()
             return
         if not _movement_eligible(unit):
             _vertical = 0
             _state = 3
             return
-        if _enabled:
-            if _record is None:
-                _record = (weakref.ref(unit), id(character), character.getGravity(), entity_id)
-            character.setGravity(0.0)
-            character.verticalVelocity = _vertical * _speed
-            _state = 1
-        elif _record is not None:
-            _restore()
-            _record = None
-
-        if _enabled or _speed_multiplier > 1.0:
-            _boost_horizontal(unit, character, entity_id, _last_tick)
+        if _record is None:
+            _record = (weakref.ref(unit), id(character), character.getGravity(), entity_id)
+        character.setGravity(0.0)
+        character.verticalVelocity = _vertical * _speed
+        _state = 1
+        _boost_horizontal(unit, character, entity_id, _last_tick)
     except Exception as error:
         _note_error(error)
         try:
