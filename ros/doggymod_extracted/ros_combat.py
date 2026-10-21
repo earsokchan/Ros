@@ -222,6 +222,7 @@ def _is_vehicle(go, entity=None):
             if any(k in low_g for k in ('vehicle', 'car', 'bike', 'motor', 'bicycle', 'jeep',
                                         'truck', 'boat', 'van', 'glider', 'plane', 'aircraft',
                                         'sports_car', 'drivable', 'quad', 'scooter', 'pickup')):
+                return True
         return False
     except Exception:
         return False
@@ -260,6 +261,88 @@ def _is_enemy_character(go, entity, service):
         return False
     except Exception:
         return True
+
+def _is_downed(entity, go=None):
+    try:
+        if entity is None and go is not None:
+            entity = getattr(go, 'entity', None)
+        if entity is None:
+            return False
+        try:
+            hp_v = float(getattr(entity, 'hp', 1.0))
+            if hp_v <= 0.0:
+                return True
+        except Exception:
+            pass
+        for d_attr in ('is_downed', 'isDowned', 'isKnocked', 'is_knocked', 'isBleedOut', 'isWounded', 'is_wounded'):
+            try:
+                val = getattr(entity, d_attr, False)
+                if callable(val):
+                    val = val()
+                if bool(val):
+                    return True
+            except Exception:
+                pass
+        return False
+    except Exception:
+        return False
+
+
+_auto_fire_tick = 0
+
+
+def _trigger_auto_shoot(player, local_entity):
+    global _auto_fire_tick
+    _auto_fire_tick += 1
+    try:
+        input_go = getattr(Globals, 'userInput', None)
+        if input_go is not None and hasattr(input_go, 'GetComponent'):
+            ic = input_go.GetComponent('InputInterpred')
+            if ic is not None:
+                # Pulse fire: 2 ticks active, 1 tick release for continuous firing across all weapons
+                fire_state = True if (_auto_fire_tick % 3 != 0) else False
+                if hasattr(ic, '_isFireBtnDwn'):
+                    try:
+                        ic._isFireBtnDwn = fire_state
+                    except Exception:
+                        pass
+                for m_name in ('onFireBtnDown', 'OnFireBtnDown', 'onFire', 'fire'):
+                    fn = getattr(ic, m_name, None)
+                    if callable(fn):
+                        try:
+                            fn(fire_state)
+                        except Exception:
+                            try:
+                                if fire_state: fn()
+                            except Exception:
+                                pass
+                        break
+    except Exception:
+        pass
+
+
+def _release_auto_shoot():
+    try:
+        input_go = getattr(Globals, 'userInput', None)
+        if input_go is not None and hasattr(input_go, 'GetComponent'):
+            ic = input_go.GetComponent('InputInterpred')
+            if ic is not None:
+                if hasattr(ic, '_isFireBtnDwn'):
+                    try:
+                        if getattr(ic, '_isFireBtnDwn', False):
+                            ic._isFireBtnDwn = False
+                    except Exception:
+                        pass
+                for m_name in ('onFireBtnDown', 'OnFireBtnDown', 'onFire', 'fire'):
+                    fn = getattr(ic, m_name, None)
+                    if callable(fn):
+                        try:
+                            fn(False)
+                        except Exception:
+                            pass
+                        break
+    except Exception:
+        pass
 
 
 def _enemy(go, player, service):
@@ -630,6 +713,7 @@ def _clear_frame():
     _frame_time = 0.0
     _target_id = None
     _fire_held = False
+    _release_auto_shoot()
     _write_esp_file('')
 
 
@@ -911,6 +995,7 @@ def _tick():
                 entity = getattr(go, 'entity', None)
                 eid = getattr(entity, 'id', None) if entity is not None else id(go)
                 is_inv = False
+                is_downed = False
                 if entity is not None:
                     try:
                         is_inv = getattr(entity, 'invincible', False)
@@ -919,8 +1004,9 @@ def _tick():
                         is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
                     except Exception:
                         is_inv = False
+                    is_downed = _is_downed(entity, go)
                 candidates.append((angle, eid, x, y, point, direction,
-                                   go, distance2, is_inv, projected is not None))
+                                   go, distance2, is_inv, projected is not None, is_downed))
             except Exception as error:
                 # A despawning or not-yet-rendered object cannot become a target.
                 _skipped += 1
@@ -954,18 +1040,7 @@ def _tick():
                         clean_name = 'Player'
 
                     # Detect if knocked / downed
-                    is_downed = False
-                    try:
-                        hp_v = float(getattr(entity, 'hp', 1.0))
-                        if hp_v <= 0.0:
-                            is_downed = True
-                    except Exception:
-                        pass
-                    if not is_downed:
-                        for d_attr in ('is_downed', 'isDowned', 'isKnocked', 'is_knocked', 'isBleedOut'):
-                            if getattr(entity, d_attr, False):
-                                is_downed = True
-                                break
+                    is_downed = c[10]
                     if is_downed:
                         clean_name = clean_name + '_[Down]'
 
@@ -1047,6 +1122,7 @@ def _tick():
                 should_aim = (_aim and _fire_held) or (_aim_smooth and using_gun)
                 if not should_aim:
                     _target_id = None
+                    _release_auto_shoot()
                 else:
                     control = camera.GetComponent('PlayerCameraController')
                     # CPlayerCameraController._onRotateCamera is an empty routine;
@@ -1054,8 +1130,8 @@ def _tick():
                     if (control is None or not callable(getattr(control, 'onRotateCamera', None))
                             or getattr(control, 'controller', None) is not None):
                         raise Waiting('Unsupported live camera controller')
-                    # Prioritize closest enemy to player character (20m before 100m)
-                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not _is_vehicle(c[6])]
+                    # Prioritize closest enemy to player character (within 100m, exclude knocked/downed)
+                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not _is_vehicle(c[6]) and not c[10] and c[7] <= 10000.0]
                     # When shooting, retain locked target so sprays remain consistent on the target
                     if _fire_held and _clear_previous_target is not None:
                         retained = [c for c in pool if c[1] == _clear_previous_target]
@@ -1084,9 +1160,11 @@ def _tick():
                             except Exception:
                                 is_inv = False
                         is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
-                        if not _enemy(selected[6], player, service) or is_inv or _is_vehicle(selected[6]):
+                        if (not _enemy(selected[6], player, service) or is_inv or
+                                _is_vehicle(selected[6]) or selected[10] or selected[7] > 10000.0):
                             selected = None
                             _target_id = None
+                            _release_auto_shoot()
                         else:
                             yaw, pitch = _angle_offset(selected[5], forward)
                             if _aim_smooth and using_gun and not _fire_held:
@@ -1131,21 +1209,33 @@ def _tick():
                             _aim_writes += 1
                             _aim_state = 5
                             _target_id = selected[1]
+
+                            # Auto shoot / Triggerbot when Aim Smooth is locked and crosshair is aligned on enemy
+                            if _aim_smooth and using_gun and abs(yaw) <= 6.0 and abs(pitch) <= 5.0:
+                                _trigger_auto_shoot(player, local_entity)
+                            else:
+                                _release_auto_shoot()
+                    else:
+                        _release_auto_shoot()
             except Waiting as aim_wait:
                 _waiting = str(aim_wait)
                 _target_id = None
+                _release_auto_shoot()
                 _aim_state = 2 if (_aim or _aim_smooth) else 0
             except Exception as aim_err:
                 _last_error = 'Aim process: %s: %s' % (type(aim_err).__name__, aim_err)
                 _target_id = None
+                _release_auto_shoot()
                 _aim_state = 2 if (_aim or _aim_smooth) else 0
     except Waiting as error:
         _waiting = str(error)
         _target_id = None
+        _release_auto_shoot()
         _aim_state = 2 if (_aim or _aim_smooth) else 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         _target_id = None
+        _release_auto_shoot()
         _aim_state = 2 if (_aim or _aim_smooth) else 0
         _esp_state = 2 if _esp else 0
 
