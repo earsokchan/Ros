@@ -2,6 +2,7 @@
 # Run inside the existing interpreter. Physics writes run on engine callbacks.
 import sys
 import time
+import os
 import weakref
 Globals = sys.modules.get('Globals')
 _movement = sys.modules.get('helpers.move_unit')
@@ -35,6 +36,82 @@ Timer = _resolve_game_timer()
 
 BUILD = 'ROS-FLY-TEST-10'
 _enabled = False
+
+# --- crash trace -----------------------------------------------------------
+# A native crash inside the Unity engine cannot be caught by Python, so the
+# only way to locate one is to record which engine call was in flight when
+# the process died. Every risky call is traced BEFORE it is issued, so the
+# last line of the trace file is the call that took the game down.
+_TRACE_FILE = None
+_TRACE_PATH = None
+_TRACE_BYTES = 0
+_TRACE_MAX = 262144
+_TRACE_INTERVAL = 0.02
+_TRACE_LAST = 0.0
+_TRACE_FORCED = False
+
+
+def _trace_path():
+    dirs = []
+    try:
+        home = os.path.expanduser('~')
+    except Exception:
+        home = None
+    if home:
+        dirs.append(home)
+        dirs.append(os.path.join(home, 'Documents'))
+    for name in ('HOME', 'TMPDIR'):
+        value = os.environ.get(name)
+        if value:
+            dirs.append(value)
+    dirs.append('/tmp')
+    dirs.append('/var/mobile/Documents')
+    for directory in dirs:
+        if not directory:
+            continue
+        try:
+            path = os.path.join(directory, 'ros_combat_trace.log')
+            handle = open(path, 'a')
+            handle.close()
+            return path
+        except Exception:
+            continue
+    return None
+
+
+def _trace(action, force=False):
+    """Record an engine call that is about to be made.
+
+    force=True always writes and flushes immediately (used for the calls
+    most likely to fault). Otherwise writes are rate limited so the trace
+    itself cannot slow the game down.
+    """
+    global _TRACE_FILE, _TRACE_PATH, _TRACE_BYTES, _TRACE_LAST
+    try:
+        now = time.time()
+        if not force and (now - _TRACE_LAST) < _TRACE_INTERVAL:
+            return
+        _TRACE_LAST = now
+        if _TRACE_FILE is None:
+            _TRACE_PATH = _trace_path()
+            if _TRACE_PATH is None:
+                return
+            _TRACE_FILE = open(_TRACE_PATH, 'a')
+            try:
+                _TRACE_BYTES = os.path.getsize(_TRACE_PATH)
+            except Exception:
+                _TRACE_BYTES = 0
+        if _TRACE_BYTES > _TRACE_MAX:
+            _TRACE_FILE.close()
+            _TRACE_FILE = open(_TRACE_PATH, 'w')
+            _TRACE_BYTES = 0
+        line = '%d %s\n' % (int(now * 1000), action)
+        _TRACE_FILE.write(line)
+        _TRACE_FILE.flush()
+        _TRACE_BYTES += len(line)
+    except Exception:
+        pass
+
 _vertical = 0
 _speed = 300.0  # Responsive vertical flight speed
 _horizontal_multiplier = 1.0
@@ -250,17 +327,34 @@ def _target():
         player = getattr(Globals, 'player', None)
         if player is None:
             return None
+        # Read the shallow fields first and the deep GameObject chain last:
+        # during a lobby -> match handover the scene can be torn down while
+        # Globals.player still points at the old object, and the deeper reads
+        # are the ones that can touch a half-destroyed native object.
+        entity = getattr(player, 'entity', None)
+        if entity is None:
+            return None
+        entity_id = getattr(entity, 'id', None)
+        if entity_id is None:
+            return None
+        _trace('fly:player.GetComponent(MoveUnit)')
         unit = player.GetComponent('MoveUnit')
         if unit is None:
             return None
-        entity = getattr(player, 'entity', None)
         character = getattr(unit, 'character', None)
-        if entity is None or character is None:
+        if character is None:
             return None
         # The component and native character must agree about entity ownership.
-        if unit.gameObject.entity.id != entity.id or character.bindingEntityID != entity.id:
+        if getattr(character, 'bindingEntityID', None) != entity_id:
             return None
-        return unit, character, entity.id
+        game_object = getattr(unit, 'gameObject', None)
+        if game_object is None:
+            return None
+        _trace('fly:unit.gameObject.entity', force=True)
+        go_entity = getattr(game_object, 'entity', None)
+        if go_entity is None or getattr(go_entity, 'id', None) != entity_id:
+            return None
+        return unit, character, entity_id
     except Exception:
         return None
 

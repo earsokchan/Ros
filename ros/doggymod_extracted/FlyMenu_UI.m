@@ -59,6 +59,7 @@ typedef void (*msgSend_void_id_long)(id, SEL, id, long);
 typedef void (*msgSend_void_id_sel_long)(id, SEL, id, SEL, long);
 typedef void (*msgSend_void_ulong)(id, SEL, unsigned long);
 typedef void (*msgSend_void_bool)(id, SEL, BOOL);
+typedef void (*msgSend_void)(id, SEL);
 
 static id g_uiMgr = NULL;
 static id g_panel = NULL;
@@ -119,6 +120,69 @@ static inline void safePyDecref(void *obj) {
 
 static int checkPlayerHoldingGun(void);
 
+// ---------------------------------------------------------------------------
+// Aim Smooth toggle state - single source of truth
+//
+// The menu switch, the floating Aim HUD and the Python runtime must never
+// disagree about whether Aim Smooth is on. Every consumer reads the persisted
+// 'sw_aimsmooth' flag through these helpers. The default is seeded exactly
+// once (on first read), so a key that was never written can no longer make
+// the switch look "on" while the runtime is "off", and the first tap on the
+// switch is always a real state change instead of a no-op.
+// ---------------------------------------------------------------------------
+static id aimSmoothDefaultsKey(void) {
+    static id s_key = NULL;
+    if (!s_key) {
+        Class strCls = cls("NSString");
+        if (!strCls) return NULL;
+        s_key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+    }
+    return s_key;
+}
+
+static BOOL aimSmoothEnabledState(void) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return NO;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    id key = aimSmoothDefaultsKey();
+    if (!defs || !key) return NO;
+
+    id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), key);
+    if (val) {
+        return (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    }
+
+    // Never written yet: seed the default once so every consumer agrees.
+    BOOL enabled = YES;
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), enabled, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    return enabled;
+}
+
+static void aimSmoothSetEnabledState(BOOL enabled) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    id key = aimSmoothDefaultsKey();
+    if (!defs || !key) return;
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), enabled, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+}
+
+// Update a clean row caption (and optionally its colour) in place.
+static void setRowLabelText(int idx, const char *text, id color) {
+    if (idx < 0 || idx >= NUM_BUTTONS) return;
+    id lbl = g_rowLabels[idx];
+    if (!lbl || !text) return;
+    Class strCls = cls("NSString");
+    if (!strCls) return;
+    id s = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), text);
+    if (!s) return;
+    ((msgSend_void_id)objc_msgSend)(lbl, sel("setText:"), s);
+    if (color) ((msgSend_void_id)objc_msgSend)(lbl, sel("setTextColor:"), color);
+    ((msgSend_void)objc_msgSend)(s, sel("release"));
+}
+
 // Helper to get app Documents path using pure Objective-C runtime
 static id getDocumentsPath(const char *filename) {
     Class fmCls = cls("NSFileManager");
@@ -154,6 +218,31 @@ static id getDocumentsPath(const char *filename) {
 }
 
 // Ensures script is on disk and returns absolute path as NSString
+static BOOL scriptMatches(const char *path, const unsigned char *data, unsigned int len) {
+    if (!path || !data || !len) return NO;
+    FILE *f = fopen(path, "rb");
+    if (!f) return NO;
+    unsigned char *buf = (unsigned char *)malloc(len);
+    if (!buf) {
+        fclose(f);
+        return NO;
+    }
+    size_t got = fread(buf, 1, len, f);
+    fclose(f);
+    BOOL same = (got == len && memcmp(buf, data, len) == 0);
+    free(buf);
+    return same;
+}
+
+static BOOL writeEmbeddedScript(const char *path, const unsigned char *data, unsigned int len) {
+    if (!path || !data || !len) return NO;
+    FILE *f = fopen(path, "wb");
+    if (!f) return NO;
+    size_t written = fwrite(data, 1, len, f);
+    fclose(f);
+    return written == (size_t)len ? YES : NO;
+}
+
 static id ensureAndGetScriptPath(const char *filename, const unsigned char *data, unsigned int len) {
     Class nsString = cls("NSString");
 
@@ -169,6 +258,12 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
                     char buf[1024];
                     snprintf(buf, sizeof(buf), "%s/%s", bStr, filename);
                     if (access(buf, R_OK) == 0) {
+                        // Refresh a stale copy so the tweak always runs the
+                        // script it ships with. An older file on disk may not
+                        // even expose the functions this build calls.
+                        if (!scriptMatches(buf, data, len)) {
+                            writeEmbeddedScript(buf, data, len);
+                        }
                         return ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), buf);
                     }
                 }
@@ -190,6 +285,9 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
         char buf[1024];
         snprintf(buf, sizeof(buf), "%s/%s", candPaths[i], filename);
         if (access(buf, R_OK) == 0) {
+            if (!scriptMatches(buf, data, len)) {
+                writeEmbeddedScript(buf, data, len);
+            }
             return ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), buf);
         }
     }
@@ -1249,19 +1347,9 @@ static void updateAimSmoothHudState(void) {
     Class uiColor = cls("UIColor");
     if (!defsCls || !strCls || !uiColor) return;
 
-    static id s_keyAimSmooth = NULL;
-    if (!s_keyAimSmooth) {
-        s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-    }
-
-    BOOL aimSmoothEnabled = YES; // Auto Aim Smooth enabled by default
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (defs && s_keyAimSmooth) {
-        id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), s_keyAimSmooth);
-        if (val) {
-            aimSmoothEnabled = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyAimSmooth);
-        }
-    }
+    // Single source of truth: the switch, the HUD and the Python runtime all
+    // read the same persisted flag, so they can no longer drift apart.
+    BOOL aimSmoothEnabled = aimSmoothEnabledState();
 
     int gunHolding = checkPlayerHoldingGun();
 
@@ -1275,36 +1363,56 @@ static void updateAimSmoothHudState(void) {
 
     setSwitchState(10, aimSmoothEnabled, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
+    // Engagement state: enabled is not the same as actually armed.
+    //   gunHolding == 1 -> holding a firearm, Aim Smooth can engage
+    //   gunHolding == 0 -> bare hands / melee / throwable, nothing to engage
+    //   gunHolding == -1 -> not in a match yet or the state is unknown
+    const char *rowText = "Aim Smooth";
+    id rowColor = whiteColor;
+    const char *aimText = "AIM: OFF";
+    id btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+    id brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+
+    if (aimSmoothEnabled) {
+        if (gunHolding == 1) {
+            // Holding a gun -> Aim Smooth is live
+            rowText = "Aim Smooth: ARMED";
+            rowColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.35, 0.40, 1.0);
+            aimText = "AIM: ARMED";
+            btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
+            brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90);
+        } else if (gunHolding == 0) {
+            // Bare hands / fists / melee -> enabled but idle
+            rowText = "Aim Smooth: NO GUN";
+            rowColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.75, 0.25, 1.0);
+            aimText = "AIM: NO GUN";
+            btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.80, 0.55, 0.05, 0.92);
+            brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.80, 0.20, 0.85);
+        } else {
+            // In lobby or combat not ready yet
+            rowText = "Aim Smooth: WAITING";
+            rowColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.45, 0.80, 1.0, 1.0);
+            aimText = "AIM: WAITING";
+            btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.16, 0.22, 0.32, 0.92);
+            brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.50);
+        }
+    }
+
+    // Row 10 caption mirrors the engagement state so the menu tells the truth
+    // about whether Aim Smooth is actually able to act right now.
+    setRowLabelText(10, rowText, rowColor);
+
     // Update on-screen floating Aim Smooth HUD button state
     if (g_aimHudToggleBtn) {
-        const char *aimText = "AIM: OFF";
-        id btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
-        id brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
-
-        if (aimSmoothEnabled) {
-            if (gunHolding == 0) {
-                // Bare hands / fists / head -> Free camera scrolling!
-                aimText = "AIM: IDLE";
-                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.80, 0.55, 0.05, 0.92);
-                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.80, 0.20, 0.85);
-            } else if (gunHolding == 1) {
-                // Holding a gun -> Active Aimlock!
-                aimText = "AIM: ON";
-                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
-                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90);
-            } else {
-                // In lobby or combat unready
-                aimText = "AIM: READY";
-                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.16, 0.22, 0.32, 0.92);
-                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.50);
-            }
-        }
-
         static id s_lastTitle = NULL;
         static const char *s_lastText = NULL;
         if (!s_lastText || strcmp(s_lastText, aimText) != 0) {
-            s_lastTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
-            s_lastText = aimText;
+            id title = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
+            if (title) {
+                if (s_lastTitle) ((msgSend_void)objc_msgSend)(s_lastTitle, sel("release"));
+                s_lastTitle = title;
+                s_lastText = aimText;
+            }
         }
         if (s_lastTitle) {
             ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), s_lastTitle, 0);
@@ -1793,6 +1901,20 @@ static void ensureFloatingFlyHUD(id win) {
 static int checkPlayerHoldingGun(void) {
     static intptr_t s_cachedCoreSlide = 0;
     static BOOL s_hasCoreSlide = NO;
+
+    // The UI refreshes several times per second and each refresh asks for the
+    // avatar weapon state, which costs a Python round trip on the GIL. Cache
+    // the answer briefly so the menu stays smooth without hammering Python.
+    static uint64_t s_lastQueryNs = 0;
+    static int s_lastResult = -1;
+    static BOOL s_hasResult = NO;
+
+    uint64_t nowNs = (uint64_t)dispatch_time(DISPATCH_TIME_NOW, 0);
+    if (s_hasResult &&
+        (nowNs - s_lastQueryNs) < (uint64_t)(0.30 * (double)NSEC_PER_SEC)) {
+        return s_lastResult;
+    }
+
     if (!s_hasCoreSlide) {
         uint32_t count = _dyld_image_count();
         for (uint32_t i = 0; i < count; i++) {
@@ -1830,14 +1952,24 @@ static int checkPlayerHoldingGun(void) {
     int hasGun = -1;
     void *dict = *pCombatDict;
     if (dict) {
-        void *res = PyRun_String("is_holding_gun_str()", 258 /* Py_eval_input */, dict, dict);
+        // Read the weapon state published by the combat tick instead of
+        // probing the engine from the UI thread: walking Globals.player while
+        // the game is handing over from the lobby into a match can touch a
+        // half-destroyed object and crash the game.
+        void *res = PyRun_String("gun_state_str()", 258 /* Py_eval_input */, dict, dict);
         if (res) {
             if (PyString_AsString) {
                 char *s = PyString_AsString(res);
                 if (s) {
-                    if (strstr(s, "1")) {
+                    // The helper returns "GUN,1" / "GUN,0" / "GUN,-": read the
+                    // trailing flag instead of substring matching, so a stray
+                    // digit in the payload can never be mistaken for the state.
+                    // Anything other than 1/0 stays "unknown" -> WAITING.
+                    size_t slen = strlen(s);
+                    char flag = slen ? s[slen - 1] : '\0';
+                    if (flag == '1') {
                         hasGun = 1;
-                    } else if (strstr(s, "0")) {
+                    } else if (flag == '0') {
                         hasGun = 0;
                     }
                 }
@@ -1847,6 +1979,10 @@ static int checkPlayerHoldingGun(void) {
         if (PyErr_Clear) PyErr_Clear();
     }
     PyGILState_Release(gstate);
+
+    s_lastQueryNs = nowNs;
+    s_lastResult = hasGun;
+    s_hasResult = YES;
     return hasGun;
 }
 
@@ -1970,11 +2106,12 @@ static void setupMenuUI(id win, id panel) {
                         ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), NO, key);
                     }
                 }
-                // Initialize sw_aimsmooth to YES by default so floating Aim HUD is auto-active
-                id keyAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-                if (keyAim) {
-                    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), YES, keyAim);
-                }
+                // Seed the Aim Smooth default only once. Forcing it here would
+                // wipe the user's choice on every launch, so the setting is
+                // read through the shared helper instead: it writes the
+                // default when the key is missing and preserves an existing
+                // value otherwise.
+                aimSmoothEnabledState();
                 ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
             }
         }
@@ -2265,7 +2402,7 @@ static void setupMenuUI(id win, id panel) {
         "Speed Epic VIP",
         "No Recoil 100% VIP",
         "Wallhack VIP",
-        "Aim Smooth (Auto Aim)",
+        "Aim Smooth",
         "Fly HUD (Outside Screen)"
     };
 
@@ -2529,20 +2666,12 @@ static void toggleAimbot_imp(id self, SEL _cmd, id sender) {
 
 // Aim Smooth 100% Auto (Button 10)
 static void toggleAimSmooth_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
-
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-    if (!key) return;
-
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    // Read through the shared helper so the first tap on a fresh install is a
+    // real state change instead of silently re-enabling an already-on feature.
+    BOOL cur = aimSmoothEnabledState();
     BOOL newState = !cur;
 
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    aimSmoothSetEnabledState(newState);
     updateRowStates();
 
     char pyCmd[128];
@@ -3257,17 +3386,15 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
                 id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
                 Class strCls = cls("NSString");
                 if (defs && strCls) {
-                    id k = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-                    if (k) {
-                        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), k);
-                        char pyCmd[128];
-                        snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", cur ? "True" : "False");
-                        runCombatPython(pyCmd);
-                    }
+                    // Use the same helper the menu switch and the HUD read, so
+                    // the state pushed to Python is always the state displayed.
+                    BOOL cur = aimSmoothEnabledState();
+                    char pyCmd[128];
+                    snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", cur ? "True" : "False");
+                    runCombatPython(pyCmd);
                     id kAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
                     if (kAim) {
                         BOOL curAim = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
-                        char pyCmd[128];
                         snprintf(pyCmd, sizeof(pyCmd), "set_aim(%s)", curAim ? "True" : "False");
                         runCombatPython(pyCmd);
                     }
