@@ -66,8 +66,8 @@ static id g_floatBtn = NULL;
 static id (*orig_pathForResource)(id self, SEL _cmd, id name, id ext) = NULL;
 
 // References to native core buttons + custom VIP buttons
-#define NUM_BUTTONS 11
-static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack, 10:AimSmooth
+#define NUM_BUTTONS 12
+static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack, 10:AimSmooth, 11:FlyHud
 static id g_rowPills[NUM_BUTTONS] = { NULL };    // Toggle switch indicators
 static id g_rowKnobs[NUM_BUTTONS] = { NULL };    // Inner sliding thumb knob
 static id g_rowLabels[NUM_BUTTONS] = { NULL };   // Clean titles
@@ -1134,8 +1134,8 @@ static void updateRowLayout(void) {
             // ESP/Vision tab: show ESP (4), Wallhack (9)
             show = (i == 4 || i == 9);
         } else if (g_selectedTab == 2) {
-            // Fly / Mobility tab: show Fly, Up, Down, Speed Epic (indices 0, 1, 2, 7)
-            show = (i == 0 || i == 1 || i == 2 || i == 7);
+            // Fly / Mobility tab: show Fly, Fly HUD Outside, Up, Down, Speed Epic (indices 0, 11, 1, 2, 7)
+            show = (i == 0 || i == 11 || i == 1 || i == 2 || i == 7);
         } else if (g_selectedTab == 3) {
             // Info tab: show Info button (index 5)
             show = (i == 5);
@@ -1249,7 +1249,11 @@ static void updateRowStates(void) {
         if (g_coreBtns[0]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[0], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            flyOn = (strstr(s, "ON") != NULL || strstr(s, "STOP") != NULL);
+            if (strstr(s, "ON") != NULL || strstr(s, "STOP") != NULL) {
+                flyOn = YES;
+            } else if (strstr(s, "OFF") != NULL) {
+                flyOn = NO;
+            }
         }
         setSwitchState(0, flyOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1375,6 +1379,27 @@ static void updateRowStates(void) {
             }
         }
         setSwitchState(10, aimSmoothOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Fly HUD Outside Screen (Button 11)
+        static id s_keyFlyHud = NULL;
+        if (strCls && !s_keyFlyHud) {
+            s_keyFlyHud = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_flyhud");
+        }
+        BOOL flyHudOn = YES;
+        if (defsCls && s_keyFlyHud) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), s_keyFlyHud);
+                if (val) {
+                    flyHudOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyFlyHud);
+                }
+            }
+        }
+        setSwitchState(11, flyHudOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        if (g_flyHudView) {
+            ((msgSend_void_long)objc_msgSend)(g_flyHudView, sel("setHidden:"), flyHudOn ? 0 : 1);
+        }
     }
 }
 
@@ -1631,12 +1656,30 @@ static void ensureFloatingFlyHUD(id win) {
     if (!win) return;
     if (!g_flyHudView) {
         createFloatingFlyHUD(win);
-        return;
     }
-    id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_flyHudView, sel("superview"));
-    if (!curSuper) {
-        ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_flyHudView);
-        ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_flyHudView);
+    if (g_flyHudView) {
+        id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_flyHudView, sel("superview"));
+        if (!curSuper) {
+            ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_flyHudView);
+            ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_flyHudView);
+        }
+        Class defsCls = cls("NSUserDefaults");
+        if (defsCls) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                Class strCls = cls("NSString");
+                if (strCls) {
+                    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_flyhud");
+                    if (key) {
+                        id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), key);
+                        if (val) {
+                            BOOL enabled = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+                            ((msgSend_void_long)objc_msgSend)(g_flyHudView, sel("setHidden:"), enabled ? 0 : 1);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1737,6 +1780,13 @@ static void setupMenuUI(id win, id panel) {
             ((msgSend_void_id_sel_long)objc_msgSend)(btnAimSmooth, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAimSmooth:"), 1 << 6);
             ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnAimSmooth);
             g_coreBtns[10] = btnAimSmooth;
+        }
+        // 11: Fly HUD Outside Screen VIP
+        id btnFlyHud = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btnFlyHud) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btnFlyHud, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleFlyHudOption:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnFlyHud);
+            g_coreBtns[11] = btnFlyHud;
         }
     }
 
@@ -1946,7 +1996,8 @@ static void setupMenuUI(id win, id panel) {
         "Speed Epic VIP",
         "No Recoil 100% VIP",
         "Wallhack VIP",
-        "Aim Smooth (Auto Aim)"
+        "Aim Smooth (Auto Aim)",
+        "Fly HUD (Outside Screen)"
     };
 
     double startY = 84.0;
@@ -2268,8 +2319,56 @@ static void toggleEsp_imp(id self, SEL _cmd, id sender) {
     printf("[FlyMenuUI] ESP Laser & Box toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
+// Toggle Fly HUD outside on screen (Button 11)
+static void toggleFlyHudOption_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_flyhud");
+    if (!key) return;
+
+    BOOL cur = YES;
+    id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), key);
+    if (val) {
+        cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    }
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    if (g_flyHudView) {
+        ((msgSend_void_long)objc_msgSend)(g_flyHudView, sel("setHidden:"), newState ? 0 : 1);
+    }
+    updateRowStates();
+
+    printf("[FlyMenuUI] Fly HUD Outside Screen toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+}
+
 // On-screen Fly HUD Actions
 static void onFlyHudToggle_imp(id self, SEL _cmd, id sender) {
+    // 1. Invoke ROSFlyTestTarget directly from FlyMenu_core
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    BOOL foundCore = NO;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            foundCore = YES;
+            break;
+        }
+    }
+    if (foundCore) {
+        id *pTarget = (id *)(coreSlide + 0xc060);
+        if (pTarget && *pTarget) {
+            ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("toggle:"), NULL);
+        }
+    }
+
     if (g_coreBtns[0]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[0], sel("sendActionsForControlEvents:"), 1 << 6);
     }
@@ -2278,6 +2377,19 @@ static void onFlyHudToggle_imp(id self, SEL _cmd, id sender) {
 }
 
 static void onFlyHudUpStart_imp(id self, SEL _cmd, id sender) {
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            id *pTarget = (id *)(coreSlide + 0xc060);
+            if (pTarget && *pTarget) {
+                ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("up:"), NULL);
+            }
+            break;
+        }
+    }
     if (g_coreBtns[1]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[1], sel("sendActionsForControlEvents:"), 1 << 0);
     }
@@ -2285,6 +2397,19 @@ static void onFlyHudUpStart_imp(id self, SEL _cmd, id sender) {
 }
 
 static void onFlyHudDownStart_imp(id self, SEL _cmd, id sender) {
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            id *pTarget = (id *)(coreSlide + 0xc060);
+            if (pTarget && *pTarget) {
+                ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("down:"), NULL);
+            }
+            break;
+        }
+    }
     if (g_coreBtns[2]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[2], sel("sendActionsForControlEvents:"), 1 << 0);
     }
@@ -2292,6 +2417,19 @@ static void onFlyHudDownStart_imp(id self, SEL _cmd, id sender) {
 }
 
 static void onFlyHudLiftStop_imp(id self, SEL _cmd, id sender) {
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            id *pTarget = (id *)(coreSlide + 0xc060);
+            if (pTarget && *pTarget) {
+                ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("release:"), NULL);
+            }
+            break;
+        }
+    }
     if (g_coreBtns[1]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[1], sel("sendActionsForControlEvents:"), 1 << 6);
     }
@@ -2923,6 +3061,7 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("onFlyHudUpStart:"), (IMP)onFlyHudUpStart_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("onFlyHudDownStart:"), (IMP)onFlyHudDownStart_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("onFlyHudLiftStop:"), (IMP)onFlyHudLiftStop_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleFlyHudOption:"), (IMP)toggleFlyHudOption_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");
@@ -2938,6 +3077,7 @@ static void initFlyMenuUI(void) {
             class_addMethod(uiMgrCls, sel("onFlyHudUpStart:"), (IMP)onFlyHudUpStart_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("onFlyHudDownStart:"), (IMP)onFlyHudDownStart_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("onFlyHudLiftStop:"), (IMP)onFlyHudLiftStop_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("toggleFlyHudOption:"), (IMP)toggleFlyHudOption_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");
