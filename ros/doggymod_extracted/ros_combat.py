@@ -26,61 +26,9 @@ if Globals is None and _fly:
     Globals = getattr(_fly, 'Globals', None)
 Timer = getattr(_fly, 'Timer', None) if _fly else None
 _movement = getattr(_fly, '_movement', None) if _fly else None
-# Crash trace: records the engine call that is in flight so a native crash
-# (which Python cannot catch) can still be located.
-_trace = getattr(_fly, '_trace', None) if _fly else None
-
-
-def _mark(action, force=False):
-    if _trace is not None:
-        try:
-            _trace(action, force)
-        except Exception:
-            pass
-
-
-def trace_path():
-    """Absolute path of the crash trace file (empty if it could not be opened)."""
-    if _fly is not None:
-        try:
-            path = _fly._trace_path()
-            if path:
-                return path
-        except Exception:
-            pass
-    return ''
-
-
-# Create the trace file up front so it always exists and can be read even if
-# the game never reaches a match.
-try:
-    _mark('combat:module-loaded', force=True)
-except Exception:
-    pass
-
-
 _esp = False
 _aim = False
 _aim_smooth = False
-# Published weapon state for the UI: -1 = unknown / not in a match,
-# 0 = empty handed, 1 = holding a firearm. Written by _tick() (which runs in
-# the engine's own timer) so the UI never has to touch the engine itself.
-_gun_state = -1
-# Scene stability: the player object and entity id observed on the previous
-# tick. Used to avoid touching the engine while a scene handover is in flight.
-_stable_player = None
-_stable_entity_id = None
-# Number of consecutive ticks the scene has been fully valid. Engine work is
-# held off until the scene has settled, so the match-entry window (where the
-# engine tears down the old scene and builds the new one) is never touched.
-_scene_ready_ticks = 0
-# Identity of the scene the last tick ran in: (id(player), entity id).
-# When it changes the engine has swapped the scene and the previous objects
-# may already be destroyed.
-_scene_fingerprint = None
-_scene_change_time = 0.0
-_MIN_SETTLE_SECONDS = 4.0
-_ARM_TICKS = 60
 _esp_state = 0
 _aim_state = 0
 _timer = None
@@ -136,15 +84,11 @@ def _bindings():
     if game3d is None:
         game3d = _binding('game3d', (_movement, canvas))
     Vector2 = _binding('Vector2', candidates)
-    Physics = None
-    RaycastHit = None
-    try:
-        Physics = _binding('Physics', candidates)
-        RaycastHit = _binding('RaycastHit', candidates)
-    except Exception:
-        pass
+    Physics = _binding('Physics', candidates)
+    RaycastHit = _binding('RaycastHit', candidates)
     for obj, name in ((monitor, 'allEnemys'), (service, 'isAvatar'),
-                      (service, 'isRobot'), (game3d, 'get_window_size')):
+                      (service, 'isRobot'), (game3d, 'get_window_size'),
+                      (Physics, 'RaycastWithScene')):
         if not callable(getattr(obj, name, None)):
             raise Waiting('Missing live interface: ' + name)
     return Camera, monitor, service, point, game3d, Vector2, Physics, RaycastHit
@@ -186,48 +130,30 @@ def _angle_between(left, right):
 
 
 def _screen_point(camera, point, resolution, origin, forward):
-    try:
-        xyz = _xyz(point)
-        direction = tuple(a - b for a, b in zip(xyz, origin))
-        # Check the actual camera forward; do not assume camera-space Z sign.
-        if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
-            return None
-        _mark('combat:WorldToScreenPoint')
-        projected = camera.WorldToScreenPoint(point)
-        if projected is None:
-            return None
-        px = getattr(projected, 'x', None)
-        py = getattr(projected, 'y', None)
-        if px is None or py is None:
-            return None
-        x, y = _finite(px) / resolution[0], _finite(py) / resolution[1]
-        # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
-        if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
-            return None
-        return x, y, direction
-    except Exception:
+    xyz = _xyz(point)
+    direction = tuple(a - b for a, b in zip(xyz, origin))
+    # Check the actual camera forward; do not assume camera-space Z sign.
+    if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
         return None
+    projected = camera.WorldToScreenPoint(point)
+    x, y = _finite(projected.x) / resolution[0], _finite(projected.y) / resolution[1]
+    # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
+    if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
+        return None
+    return x, y, direction
 
 
 def _enemy(go, player, service):
     try:
-        if go is None or player is None:
-            return False
         entity = getattr(go, 'entity', None)
         local = getattr(player, 'entity', None)
-        if entity is None or local is None:
-            # Training dummies or target GameObjects may not have an entity attribute
-            # Allow them in training mode if they are valid GameObjects
-            return True
-        eid = getattr(entity, 'id', None)
-        lid = getattr(local, 'id', None)
-        if eid is not None and lid is not None and eid == lid:
+        if entity is None or local is None or entity.id == local.id:
             return False
 
         # Teammate check via live engine method
-        if eid is not None and callable(getattr(local, 'isBattleMate', None)):
+        if callable(getattr(local, 'isBattleMate', None)):
             try:
-                if local.isBattleMate(eid):
+                if local.isBattleMate(entity.id):
                     return False
             except Exception:
                 pass
@@ -245,6 +171,7 @@ def _enemy(go, player, service):
                 pass
 
         # Dead check: only reject if actually dead in game (turned to loot box)
+        # Downed / knocked / crawling players have hp == 0 but deadInGame == False!
         if getattr(entity, 'deadInGame', False):
             return False
 
@@ -268,11 +195,8 @@ def _enemy(go, player, service):
             if any(k in low_c for k in ('avatar', 'player', 'robot', 'combat', 'human', 'npc', 'vehicle')):
                 is_avatar = True
             elif hasattr(go, 'GetComponent'):
-                try:
-                    if go.GetComponent('CombatUnit') is not None or go.GetComponent('MoveUnit') is not None:
-                        is_avatar = True
-                except Exception:
-                    pass
+                if go.GetComponent('CombatUnit') is not None or go.GetComponent('MoveUnit') is not None:
+                    is_avatar = True
 
         return True
     except Exception:
@@ -319,12 +243,12 @@ def _is_using_gun(player, local_entity):
         # Primary character objects and their weapon/equip components
         char_objs = []
         for l, o in [('entity', local_entity), ('player', player), ('avatar', avatar)]:
-            if o is not None and not any(o is x[1] for x in char_objs):
+            if o is not None and o not in [x[1] for x in char_objs]:
                 char_objs.append((l, o))
                 for comp_name in ('weapon_comp', 'weapon_component', 'weaponComponent', 'equip_comp', 'equip_component', 'weapon_mgr', 'weapon_bag'):
                     try:
                         comp = getattr(o, comp_name, None)
-                        if comp is not None and not any(comp is x[1] for x in char_objs):
+                        if comp is not None and comp not in [x[1] for x in char_objs]:
                             char_objs.append(('%s.%s' % (l, comp_name), comp))
                     except Exception:
                         pass
@@ -336,7 +260,7 @@ def _is_using_gun(player, local_entity):
                 bwp = getattr(bw, 'player', None)
                 if callable(bwp):
                     bwp = bwp()
-                if bwp is not None and not any(bwp is x[1] for x in char_objs):
+                if bwp is not None and bwp not in [x[1] for x in char_objs]:
                     char_objs.append(('BigWorld.player', bwp))
             except Exception:
                 pass
@@ -345,9 +269,8 @@ def _is_using_gun(player, local_entity):
         if player is not None and hasattr(player, 'GetComponent'):
             for c_name in ('ShootAssist', 'CombatUnit', 'WeaponComponent', 'WeaponMachine', 'Equip'):
                 try:
-                    _mark('combat:is_using_gun.GetComponent')
                     comp = player.GetComponent(c_name)
-                    if comp is not None and not any(comp is x[1] for x in char_objs):
+                    if comp is not None and comp not in [x[1] for x in char_objs]:
                         char_objs.append(('Component.' + c_name, comp))
                 except Exception:
                     pass
@@ -531,120 +454,49 @@ def _is_using_gun(player, local_entity):
             except Exception:
                 pass
 
-        # Default: if no weapon or unarmed, return False
-        _weapon_debug = 'no_gun_detected->False'
+        # ===== DEFAULT: True (Holding a gun) =====
+        # When Aim Smooth is active and not detected as unarmed, allow aimlock to work smoothly
+        _weapon_debug = 'default_active->True'
         _log_weapon_debug(_weapon_debug)
-        return False
+        return True
     except Exception as e:
-        _weapon_debug = 'exception:%s->False' % str(e)
+        _weapon_debug = 'exception:%s->True' % str(e)
         _log_weapon_debug(_weapon_debug)
-        return False
-
-
-def _in_match_scene():
-    """
-    Report whether the local player is currently inside a live match scene.
-    Returns True/False when the scene state is known and None when it cannot
-    be told (no fly module, no scene target, ...).
-    """
-    if not _fly:
-        return None
-    try:
-        target_fn = getattr(_fly, '_target', None)
-        if not callable(target_fn):
-            return None
-        t = target_fn()
-        if not t:
-            return False
-        u = t[0]
-        return bool(getattr(u, 'chInScene', False))
-    except Exception:
-        return False
+        return True
 
 
 def is_holding_gun():
     """
     Exposed helper to check if avatar is currently holding a gun.
-    Returns 1 if holding a firearm, 0 if using bare hands / melee / throwables / in lobby.
+    Returns 1 if holding a firearm, 0 if using bare hands / melee / throwables.
     """
     try:
-        # Check if in a match scene first
-        if _in_match_scene() is False:
-            return 0
-        return 1 if _avatar_has_gun() else 0
+        g = sys.modules.get('Globals')
+        if g is None and 'Globals' in globals():
+            g = Globals
+        player = None
+        if g is not None:
+            for p_attr in ('player', 'avatar', 'local_player', 'cur_player'):
+                p = getattr(g, p_attr, None)
+                if p is not None:
+                    player = p
+                    break
+        entity = None
+        if player is not None:
+            entity = getattr(player, 'entity', None)
+        if entity is None and g is not None:
+            entity = getattr(g, 'avatar', None) or getattr(g, 'entity', None)
+        return 1 if _is_using_gun(player, entity) else 0
     except Exception:
-        return 0
-
-
-def _avatar_has_gun():
-    """
-    Inspect the local avatar for a firearm. Assumes the caller already
-    established that we are inside a match scene, so it never probes the
-    scene itself.
-    """
-    g = sys.modules.get('Globals')
-    if g is None and 'Globals' in globals():
-        g = Globals
-    player = None
-    if g is not None:
-        for p_attr in ('player', 'avatar', 'local_player', 'cur_player'):
-            p = getattr(g, p_attr, None)
-            if p is not None:
-                player = p
-                break
-    entity = None
-    if player is not None:
-        entity = getattr(player, 'entity', None)
-    if entity is None and g is not None:
-        entity = getattr(g, 'avatar', None) or getattr(g, 'entity', None)
-    return _is_using_gun(player, entity)
-
-
-def gun_state_str():
-    # Returns fresh dynamically joined string so Py_DECREF in C caller safely frees it
-    #   'GUN,1' = holding a firearm
-    #   'GUN,0' = inside a match but empty handed (fists / melee / throwable)
-    #   'GUN,-' = not in a match yet or the state is unknown
-    #
-    # This only reads a value published by _tick(), so the UI thread never
-    # touches the engine: walking Globals.player during a lobby -> match
-    # handover can dereference a half-destroyed object and crash the game.
-    if _gun_state > 0:
-        return ','.join(['GUN', '1'])
-    if _gun_state == 0:
-        return ','.join(['GUN', '0'])
-    return ','.join(['GUN', '-'])
-
-
-def is_holding_gun_str():
-    # Returns fresh dynamically joined string so Py_DECREF in C caller safely frees it
-    #   'GUN,1' = holding a firearm
-    #   'GUN,0' = inside a match but empty handed (fists / melee / throwable)
-    #   'GUN,-' = not in a match yet or the scene state is unknown
-    scene = _in_match_scene()
-    if scene is False:
-        return ','.join(['GUN', '-'])
-    return ','.join(['GUN', '1' if _avatar_has_gun() else '0'])
+        return 1
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
-    try:
-        if Physics is None or RaycastHit is None:
-            return True
-        if not hasattr(Physics, 'RaycastWithScene'):
-            return True
-        direction = point - camera_position
-        distance = _finite(getattr(direction, 'magnitude', 0.0))
-        if distance <= 0.00001:
-            return False
-        _mark('combat:RaycastWithScene')
-        try:
-            hit = RaycastHit()
-            return not Physics.RaycastWithScene(camera_position, direction, hit, distance)
-        except Exception:
-            return True
-    except Exception:
-        return True
+    direction = point - camera_position
+    distance = _finite(direction.magnitude)
+    if distance <= 0.00001:
+        return False
+    return not Physics.RaycastWithScene(camera_position, direction, RaycastHit(), distance)
 
 
 def _extract_real_name(entity, go):
@@ -703,10 +555,9 @@ def _ensure_timer():
 
 
 def _stop_timer():
-    global _timer, _gun_state
+    global _timer
     timer = _timer
     _timer = None
-    _gun_state = -1
     if timer is not None:
         try:
             Timer.delTimer(timer)
@@ -806,8 +657,6 @@ def _tick():
     global _last_tick, _owner, _target_id, _frame, _rich_esp_frame, _frame_time
     global _esp_state, _aim_state, _last_error, _last_skip, _waiting, _ticks, _scanned, _skipped
     global _fire_held, _aim_writes, _last_angles, _esp, _aim, _aim_smooth, _last_esp_str
-    global _gun_state, _stable_player, _stable_entity_id
-    global _scene_ready_ticks, _scene_fingerprint
     now = time.time()
     previous_tick = _last_tick
     _last_tick = now
@@ -824,176 +673,62 @@ def _tick():
         character = None
         entity_id = None
         player = getattr(Globals, 'player', None)
-        if player is None:
-            _waiting = 'Waiting for local player'
-            _gun_state = -1
-            _scene_change_time = now
-            _scene_fingerprint = None
-            _clear_frame()
-            _target_id = None
-            return
-
-        local_entity = getattr(player, 'entity', None)
-        if local_entity is None:
-            _waiting = 'Waiting for player.entity'
-            _gun_state = -1
-            _scene_change_time = now
-            _scene_fingerprint = None
-            _clear_frame()
-            _target_id = None
-            return
-
-        entity_id = getattr(local_entity, 'id', None)
-        if entity_id is None:
-            _waiting = 'Waiting for entity.id'
-            _gun_state = -1
-            _scene_change_time = now
-            _scene_fingerprint = None
-            _clear_frame()
-            _target_id = None
-            return
-
-        # 1. IMMEDIATE SCENE TRANSITION CHECK (before touching any C++ components/interfaces)
-        fingerprint = (id(player), entity_id)
-        if fingerprint != _scene_fingerprint:
-            _scene_fingerprint = fingerprint
-            _scene_change_time = now
-            _waiting = 'Waiting for scene and character to finish loading'
-            _gun_state = -1
-            _clear_frame()
-            _target_id = None
-            return
-
-        # 2. MANDATORY SETTLING DELAY (4.0 seconds quiet period)
-        # Allows all textures, meshes, skeletons, and PhysX colliders to finish streaming.
-        elapsed = now - _scene_change_time
-        if elapsed < _MIN_SETTLE_SECONDS:
-            _waiting = 'Character loading... (%.1fs)' % max(0.1, _MIN_SETTLE_SECONDS - elapsed)
-            _gun_state = -1
-            _clear_frame()
-            _target_id = None
-            return
-
-        # 3. VERIFY GROUND CHARACTER & MOVEMENT ELIGIBILITY
-        unit = None
-        character = None
         if _fly:
             try:
                 target = _fly._target()
                 if target:
                     unit, character, entity_id = target
+                    player = getattr(Globals, 'player', None) or player
             except Exception:
                 pass
-
-        if (unit is None or character is None or
-                not getattr(unit, 'chInScene', False) or
-                not getattr(unit, '_active', False) or
-                getattr(unit, 'inVehicle', False) or
-                getattr(unit, '_useParachute', False) or
-                getattr(unit, '_observer', False)):
-            _waiting = 'Waiting for active ground character (not in plane/parachute)'
-            _gun_state = -1
-            _clear_frame()
-            _target_id = None
+        if player is None:
+            _waiting = 'Waiting for local player'
             return
-
-        # 4. VERIFY CHARACTER WORLD POSITION IS NON-ZERO
-        try:
-            cpos = getattr(character, 'position', None)
-            if cpos is None or (abs(float(cpos.x)) < 0.001 and abs(float(cpos.y)) < 0.001 and abs(float(cpos.z)) < 0.001):
-                _waiting = 'Waiting for character 3D spawn'
-                _gun_state = -1
-                _clear_frame()
-                _target_id = None
-                return
-        except Exception:
+        local_entity = getattr(player, 'entity', None)
+        if local_entity is None:
+            _waiting = 'Waiting for player.entity'
             return
-
-        # 5. VERIFY GAMEPLAY INPUT IS ACTIVE (loading screen dismissed)
-        try:
-            input_go = getattr(Globals, 'userInput', None)
-            if input_go is not None and hasattr(input_go, 'GetComponent'):
-                ic = input_go.GetComponent('InputInterpred')
-                if ic is not None and not getattr(ic, '_inputEnable', True):
-                    _waiting = 'Waiting for gameplay input to enable'
-                    _gun_state = -1
-                    _clear_frame()
-                    _target_id = None
-                    return
-        except Exception:
-            pass
-
-        # 6. BIND ENGINE INTERFACES & CAMERA
-        Camera, monitor, service, get_point, game3d, Vector2, Physics, RaycastHit = _bindings()
-        camera = getattr(Camera, 'main', None)
-        if camera is None:
-            _waiting = 'Waiting for main camera'
-            _gun_state = -1
-            _clear_frame()
-            _target_id = None
+        if getattr(local_entity, 'deadInGame', False):
+            _esp_state = 3 if _esp else 0
+            _aim_state = 3 if _aim else 0
+            _waiting = 'Local character dead'
             return
-
+        if entity_id is None:
+            entity_id = getattr(local_entity, 'id', None)
         owner = (id(player), entity_id)
         if owner != _owner:
             _clear_previous_target = None
             _owner = owner
-
-        try:
-            cam_tf = getattr(camera, 'transform', None)
-            if cam_tf is None:
-                raise Waiting('Waiting for camera transform')
-            camera_position = cam_tf.position
-            cam_fwd = cam_tf.forward
-            if abs(float(camera_position.x)) < 0.001 and abs(float(camera_position.y)) < 0.001 and abs(float(camera_position.z)) < 0.001:
-                raise Waiting('Waiting for active camera spawn')
-            origin, forward = _xyz(camera_position), _xyz(cam_fwd)
-        except Exception:
-            raise Waiting('Waiting for camera transform')
-
-        # Resolve the weapon state once, here, inside the engine's own timer.
-        # The UI reads the published _gun_state instead of walking
-        # Globals.player itself: doing that from the UI thread during a
-        # lobby -> match handover can dereference a half-destroyed object and
-        # crash the game.
-        using_gun = False
-        if _aim or _aim_smooth:
-            try:
-                using_gun = bool(_is_using_gun(player, local_entity))
-            except Exception:
-                using_gun = False
-            _gun_state = 1 if using_gun else 0
-        else:
-            _gun_state = -1
-        _mark('combat:get_window_size')
+        Camera, monitor, service, get_point, game3d, Vector2, Physics, RaycastHit = _bindings()
+        camera = getattr(Camera, 'main', None)
+        if camera is None:
+            raise Waiting('Waiting for main camera')
+        camera_position = camera.transform.position
+        origin, forward = _xyz(camera_position), _xyz(camera.transform.forward)
         size = game3d.get_window_size()
         resolution = (_finite(size[0]), _finite(size[1]))
         if min(resolution) <= 1.0:
             raise Waiting('Waiting for game window resolution')
         candidates = []
-        _mark('combat:allEnemys')
         for go in list(monitor.allEnemys()):
             _scanned += 1
             try:
                 if not _enemy(go, player, service):
                     continue
                 point = None
-                # Check entity.position and transform.position FIRST (safest, no C++ model bone access)
                 try:
-                    ent = getattr(go, 'entity', None)
-                    if ent is not None and hasattr(ent, 'position'):
-                        point = ent.position
+                    point = get_point(go)
                 except Exception:
                     pass
                 if point is None:
                     try:
-                        tf = getattr(go, 'transform', None)
-                        if tf is not None and hasattr(tf, 'position'):
-                            point = tf.position
+                        point = go.transform.position
                     except Exception:
                         pass
-                if point is None and callable(get_point):
+                if point is None:
                     try:
-                        point = get_point(go)
+                        ent = getattr(go, 'entity', None)
+                        point = getattr(ent, 'position', None)
                     except Exception:
                         pass
                 if point is None:
@@ -1007,17 +742,16 @@ def _tick():
                 x = projected[0] if projected is not None else -1.0
                 y = projected[1] if projected is not None else -1.0
                 entity = getattr(go, 'entity', None)
-                eid = getattr(entity, 'id', None) if entity is not None else id(go)
-                is_inv = False
-                if entity is not None:
+                if entity is None:
+                    continue
+                is_inv = getattr(entity, 'invincible', False)
+                if callable(is_inv):
                     try:
-                        is_inv = getattr(entity, 'invincible', False)
-                        if callable(is_inv):
-                            is_inv = is_inv()
-                        is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
+                        is_inv = is_inv()
                     except Exception:
                         is_inv = False
-                candidates.append((angle, eid, x, y, point, direction,
+                is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
+                candidates.append((angle, entity.id, x, y, point, direction,
                                    go, distance2, is_inv, projected is not None))
             except Exception as error:
                 # A despawning or not-yet-rendered object cannot become a target.
@@ -1145,12 +879,11 @@ def _tick():
 
                 # 1. Aimbot 360 Lock (Button 3): needs shooting (user shoots / holds fire button to aimlock)
                 # 2. Aim Smooth (Button 10): auto locks aim to enemy when holding a firearm (auto aim without needing to shoot)
-                # using_gun was already resolved above, inside the engine timer.
+                using_gun = _is_using_gun(player, local_entity)
                 should_aim = (_aim and _fire_held) or (_aim_smooth and using_gun)
                 if not should_aim:
                     _target_id = None
                 else:
-                    _mark('combat:GetComponent(PlayerCameraController)')
                     control = camera.GetComponent('PlayerCameraController')
                     # CPlayerCameraController._onRotateCamera is an empty routine;
                     # fail explicitly rather than claiming a lock on that backend.
@@ -1168,12 +901,9 @@ def _tick():
                     # Immediate lock: Pass 1 finds closest visible enemy via direct physics raycast
                     selected = None
                     for candidate in pool[:10]:
-                        try:
-                            if _visible(Physics, RaycastHit, camera_position, candidate[4]):
-                                selected = candidate
-                                break
-                        except Exception:
-                            pass
+                        if _visible(Physics, RaycastHit, camera_position, candidate[4]):
+                            selected = candidate
+                            break
                     # Pass 2: if direct raycast fails (e.g. grass, leaves, fence, window), lock onto closest enemy on screen
                     if selected is None:
                         for candidate in pool[:8]:
@@ -1189,16 +919,13 @@ def _tick():
                         latest_player = getattr(Globals, 'player', None)
                         if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
                             raise Waiting('Local character changed')
-                        sel_ent = getattr(selected[6], 'entity', None)
-                        is_inv = False
-                        if sel_ent is not None:
+                        is_inv = getattr(selected[6].entity, 'invincible', False)
+                        if callable(is_inv):
                             try:
-                                is_inv = getattr(sel_ent, 'invincible', False)
-                                if callable(is_inv):
-                                    is_inv = is_inv()
-                                is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
+                                is_inv = is_inv()
                             except Exception:
                                 is_inv = False
+                        is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
                         if not _enemy(selected[6], player, service) or is_inv:
                             selected = None
                             _target_id = None
@@ -1216,11 +943,7 @@ def _tick():
                                 if abs(pitch) <= 1.4:
                                     smooth_pitch = pitch
                                 _last_angles = (smooth_yaw, smooth_pitch)
-                                _mark('combat:onRotateCamera', force=True)
-                                try:
-                                    control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                                except Exception:
-                                    pass
+                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                             elif _aim_smooth and using_gun and _fire_held:
                                 # High-speed responsive lock when shooting
                                 factor = 0.85
@@ -1233,19 +956,11 @@ def _tick():
                                 if abs(pitch) <= 1.8:
                                     smooth_pitch = pitch
                                 _last_angles = (smooth_yaw, smooth_pitch)
-                                _mark('combat:onRotateCamera', force=True)
-                                try:
-                                    control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                                except Exception:
-                                    pass
+                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                             else:
                                 # Instant lock when Aimbot 360 Lock is used alone
                                 _last_angles = (yaw, pitch)
-                                _mark('combat:onRotateCamera', force=True)
-                                try:
-                                    control.onRotateCamera(Vector2(yaw, pitch), True)
-                                except Exception:
-                                    pass
+                                control.onRotateCamera(Vector2(yaw, pitch), True)
                             _aim_writes += 1
                             _aim_state = 5
                             _target_id = selected[1]
@@ -1261,13 +976,11 @@ def _tick():
         _waiting = str(error)
         _target_id = None
         _aim_state = 2 if (_aim or _aim_smooth) else 0
-        _scene_ready_ticks = 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         _target_id = None
         _aim_state = 2 if (_aim or _aim_smooth) else 0
         _esp_state = 2 if _esp else 0
-        _scene_ready_ticks = 0
 
 
 def snapshot():
@@ -1300,7 +1013,7 @@ def snapshot():
 def esp_snapshot():
     global _esp, _last_esp_str, _frame_time, _last_error
     if not _esp:
-        return ','.join(['NONE'])
+        return 'NONE'
     now = time.time()
     if _timer is None or now - _last_tick > 3.0:
         try:
@@ -1310,10 +1023,8 @@ def esp_snapshot():
             _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
     age = now - _frame_time
     if age < 0.0 or age > 3.0:
-        return ','.join(['NONE'])
-    if _last_esp_str and _last_esp_str != 'NONE':
-        return ','.join([_last_esp_str])
-    return ','.join(['NONE'])
+        return 'NONE'
+    return _last_esp_str or 'NONE'
 
 
 def diagnostics():
