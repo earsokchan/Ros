@@ -95,6 +95,13 @@ static id g_flyHudUpBtn = NULL;
 static id g_flyHudDownBtn = NULL;
 static void ensureFloatingFlyHUD(id win);
 
+// On-screen Floating Aim Smooth HUD Globals
+static id g_aimHudView = NULL;
+static id g_aimHudToggleBtn = NULL;
+static void ensureFloatingAimHUD(id win);
+static void createFloatingAimHUD(id win);
+static int checkPlayerHoldingGun(void);
+
 // Helper to get app Documents path using pure Objective-C runtime
 static id getDocumentsPath(const char *filename) {
     Class fmCls = cls("NSFileManager");
@@ -628,6 +635,10 @@ static void ensureESPOverlayOnTop(void) {
         if (g_flyHudView) {
             id hudSuper = ((id (*)(id, SEL))objc_msgSend)(g_flyHudView, sel("superview"));
             if (hudSuper) ((msgSend_void_id)objc_msgSend)(hudSuper, sel("bringSubviewToFront:"), g_flyHudView);
+        }
+        if (g_aimHudView) {
+            id aimSuper = ((id (*)(id, SEL))objc_msgSend)(g_aimHudView, sel("superview"));
+            if (aimSuper) ((msgSend_void_id)objc_msgSend)(aimSuper, sel("bringSubviewToFront:"), g_aimHudView);
         }
         if (g_panel) {
             id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
@@ -1392,6 +1403,41 @@ static void updateRowStates(void) {
         }
         setSwitchState(10, aimSmoothOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
+        // Update on-screen floating Aim Smooth HUD button state
+        if (g_aimHudToggleBtn) {
+            Class nsString = cls("NSString");
+            Class uiColor = cls("UIColor");
+            if (nsString && uiColor) {
+                int gunHolding = checkPlayerHoldingGun();
+                // When holding a gun, auto activate; when unarmed/hands, auto deactivate
+                BOOL aimActive = aimSmoothOn && (gunHolding != 0);
+                const char *aimText = "AIM: OFF";
+                if (aimSmoothOn) {
+                    if (gunHolding == 1) {
+                        aimText = "AIM: ON";
+                    } else if (gunHolding == 0) {
+                        aimText = "AIM: OFF";
+                    } else {
+                        aimText = "AIM: ON";
+                    }
+                }
+                id aimTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), aimText);
+                ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), aimTitle, 0);
+
+                id btnBg = aimActive ? onPillBg : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+                if (btnBg) ((msgSend_void_id)objc_msgSend)(g_aimHudToggleBtn, sel("setBackgroundColor:"), btnBg);
+
+                id tLayer = ((id (*)(id, SEL))objc_msgSend)(g_aimHudToggleBtn, sel("layer"));
+                if (tLayer) {
+                    id brdColor = aimActive ? activeBorder : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+                    if (brdColor) {
+                        id cgBrd = ((id (*)(id, SEL))objc_msgSend)(brdColor, sel("CGColor"));
+                        ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgBrd);
+                    }
+                }
+            }
+        }
+
         // Fly HUD Outside Screen (Button 11)
         static id s_keyFlyHud = NULL;
         if (strCls && !s_keyFlyHud) {
@@ -1691,6 +1737,146 @@ static void ensureFloatingFlyHUD(id win) {
                     }
                 }
             }
+        }
+    }
+}
+
+// Queries Python combat engine to check if avatar is currently holding a firearm (1) vs bare hands (0)
+static int checkPlayerHoldingGun(void) {
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            break;
+        }
+    }
+    if (!coreSlide) return -1;
+    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
+    if (!pCombatReady || *pCombatReady != 1) return -1;
+    void **pCombatDict = (void **)(coreSlide + 0xc168);
+    if (!pCombatDict || !(*pCombatDict)) return -1;
+    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
+    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
+    void **pPyRunString = (void **)(coreSlide + 0xc138);
+    void **pPyStringAsString = (void **)(coreSlide + 0xc150);
+    if (!pPyGILStateEnsure || !*pPyGILStateEnsure || !pPyGILStateRelease || !*pPyGILStateRelease || !pPyRunString || !*pPyRunString) return -1;
+
+    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
+    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
+    char *(*PyString_AsString)(void *) = pPyStringAsString ? (char *(*)(void *))*pPyStringAsString : NULL;
+
+    int gstate = PyGILState_Ensure();
+    int hasGun = 0;
+    void *dict = *pCombatDict;
+    if (dict) {
+        void *res = PyRun_String("str(is_holding_gun())", 258 /* Py_eval_input */, dict, dict);
+        if (res && PyString_AsString) {
+            char *s = PyString_AsString(res);
+            if (s && s[0] == '1') {
+                hasGun = 1;
+            }
+        }
+    }
+    PyGILState_Release(gstate);
+    return hasGun;
+}
+
+static void createFloatingAimHUD(id win) {
+    if (g_aimHudView || !win) return;
+
+    Class uiView = cls("UIView");
+    Class uiBtn = cls("UIButton");
+    Class uiColor = cls("UIColor");
+    Class uiFont = cls("UIFont");
+    Class nsString = cls("NSString");
+    Class panCls = cls("UIPanGestureRecognizer");
+    if (!uiView || !uiBtn || !uiColor || !nsString) return;
+
+    // Outer container view: 110 x 38 pill positioned cleanly on screen
+    id hudView = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
+    if (!hudView) return;
+
+    ((msgSend_void_rect)objc_msgSend)(hudView, sel("setFrame:"), CGRectMake(20, 210, 110, 38));
+    ((msgSend_void_long)objc_msgSend)(hudView, sel("setUserInteractionEnabled:"), 1);
+
+    id hudBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.05, 0.07, 0.11, 0.88);
+    if (hudBg) ((msgSend_void_id)objc_msgSend)(hudView, sel("setBackgroundColor:"), hudBg);
+
+    id hudLayer = ((id (*)(id, SEL))objc_msgSend)(hudView, sel("layer"));
+    if (hudLayer) {
+        ((msgSend_void_double)objc_msgSend)(hudLayer, sel("setCornerRadius:"), 19.0);
+        ((msgSend_void_double)objc_msgSend)(hudLayer, sel("setBorderWidth:"), 1.5);
+        id bColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.20, 0.70, 0.90, 0.45);
+        if (bColor) {
+            id cgB = ((id (*)(id, SEL))objc_msgSend)(bColor, sel("CGColor"));
+            ((msgSend_void_id)objc_msgSend)(hudLayer, sel("setBorderColor:"), cgB);
+        }
+        ((msgSend_void_long)objc_msgSend)(hudLayer, sel("setMasksToBounds:"), 1);
+    }
+
+    // Aim Smooth Toggle Button (frame: 4, 4, 102, 30)
+    id toggleBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+    if (toggleBtn) {
+        ((msgSend_void_rect)objc_msgSend)(toggleBtn, sel("setFrame:"), CGRectMake(4, 4, 102, 30));
+        id defBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+        if (defBg) ((msgSend_void_id)objc_msgSend)(toggleBtn, sel("setBackgroundColor:"), defBg);
+
+        id tLayer = ((id (*)(id, SEL))objc_msgSend)(toggleBtn, sel("layer"));
+        if (tLayer) {
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setCornerRadius:"), 15.0);
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setBorderWidth:"), 1.0);
+            id tBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+            if (tBorder) {
+                id cgTB = ((id (*)(id, SEL))objc_msgSend)(tBorder, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgTB);
+            }
+            ((msgSend_void_long)objc_msgSend)(tLayer, sel("setMasksToBounds:"), 1);
+        }
+
+        id tTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "AIM: OFF");
+        id whiteColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 1.0, 1.0, 1.0);
+        ((msgSend_id_id_long)objc_msgSend)(toggleBtn, sel("setTitle:forState:"), tTitle, 0);
+        ((msgSend_id_id_long)objc_msgSend)(toggleBtn, sel("setTitleColor:forState:"), whiteColor, 0);
+
+        id lbl = ((id (*)(id, SEL))objc_msgSend)(toggleBtn, sel("titleLabel"));
+        if (lbl && uiFont) {
+            id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 11.0);
+            if (font) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), font);
+        }
+
+        ((msgSend_void_id_sel_long)objc_msgSend)(toggleBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAimSmooth:"), 1 << 6);
+        ((msgSend_void_id)objc_msgSend)(hudView, sel("addSubview:"), toggleBtn);
+        g_aimHudToggleBtn = toggleBtn;
+    }
+
+    // Pan drag gesture to move the Aim HUD anywhere on screen
+    if (panCls) {
+        id hudPan = ((id (*)(id, SEL, id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)panCls, sel("alloc")), sel("initWithTarget:action:"), g_uiMgr, sel("handleFloatPan:"));
+        if (hudPan) {
+            ((msgSend_void_id)objc_msgSend)(hudView, sel("addGestureRecognizer:"), hudPan);
+        }
+    }
+
+    ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), hudView);
+    ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), hudView);
+
+    g_aimHudView = hudView;
+    printf("[FlyMenuUI] On-screen Floating Aim HUD created on UIWindow\n");
+}
+
+static void ensureFloatingAimHUD(id win) {
+    if (!win) return;
+    if (!g_aimHudView) {
+        createFloatingAimHUD(win);
+    }
+    if (g_aimHudView) {
+        id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_aimHudView, sel("superview"));
+        if (!curSuper) {
+            ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_aimHudView);
+            ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_aimHudView);
         }
     }
 }
@@ -2179,9 +2365,10 @@ static void setupMenuUI(id win, id panel) {
         ((msgSend_void_id)objc_msgSend)(panel, sel("bringSubviewToFront:"), btn);
     }
 
-    // 7. Ensure Floating Logo Button and on-screen Fly HUD are on the active window
+    // 7. Ensure Floating Logo Button and on-screen Fly & Aim HUDs are on the active window
     ensureFloatingButtonOnWindow(win);
     ensureFloatingFlyHUD(win);
+    ensureFloatingAimHUD(win);
 }
 
 static inline void safePyDecref(void *obj) {
@@ -2937,9 +3124,10 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
     id win = getActiveWindow();
     if (!win) return;
 
-    // 1. Ensure floating logo button and on-screen Fly HUD are present on window
+    // 1. Ensure floating logo button and on-screen Fly & Aim HUDs are present on window
     ensureFloatingButtonOnWindow(win);
     ensureFloatingFlyHUD(win);
+    ensureFloatingAimHUD(win);
 
     // 2. Discover and hook FlyMenu_core panel across windows safely
     if (!g_panel) {
@@ -2998,6 +3186,12 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
                 id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
                 if (fSuper) {
                     ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
+                }
+            }
+            if (g_aimHudView) {
+                id aSuper = ((id (*)(id, SEL))objc_msgSend)(g_aimHudView, sel("superview"));
+                if (aSuper) {
+                    ((msgSend_void_id)objc_msgSend)(aSuper, sel("bringSubviewToFront:"), g_aimHudView);
                 }
             }
             long isHidden = (long)((long (*)(id, SEL))objc_msgSend)(g_panel, sel("isHidden"));
