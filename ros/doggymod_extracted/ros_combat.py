@@ -694,12 +694,9 @@ def handle(action):
     global _esp, _aim, _aim_smooth, _esp_state, _aim_state, _last_error, _target_id
     try:
         if action == 'esp':
-            _esp = not _esp
-            _esp_state = 1 if _esp else 0
-            if not _esp:
-                _write_esp_file('')
-                if not _aim and not _aim_smooth:
-                    _clear_frame()
+            _esp = False
+            _esp_state = 0
+            _write_esp_file('')
         elif action == 'aim':
             _aim = not _aim
             _aim_state = 1 if _aim else 0
@@ -748,19 +745,14 @@ def set_aim(val):
 def set_esp(val):
     global _esp, _esp_state, _last_error
     try:
-        _esp = bool(val)
-        _esp_state = 1 if _esp else 0
-        if _esp:
-            _ensure_timer()
-        else:
-            _write_esp_file('')
-            if not _aim and not _aim_smooth:
-                _clear_frame()
-                _stop_timer()
-        return _esp
+        _esp = False
+        _esp_state = 0
+        _write_esp_file('')
+        return False
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         return False
+
 
 
 def set_aim_smooth(val):

@@ -26,7 +26,7 @@ Architecture: iphoneos-arm64
 Replaces: com.doggymod.ros
 Conflicts: com.doggymod.ros
 Provides: com.doggymod.ros
-Description: Rules of Survival VIP Mod Menu (Ros_ikhozzzz {'v2' if is_rootless else 'v1'}) with Floating Logo, Close [X] Button, Aimbot 360, ESP Laser & Box, Fly Hack, 1 Hit Kill, Speed Epic, No Recoil 100% & Wallhack ({'Rootless' if is_rootless else 'Rootful'}).
+Description: Rules of Survival VIP Mod Menu (Ros_ikhozzzz {'v2' if is_rootless else 'v1'}) with Floating Logo, Close [X] Button, Aimbot 360, Aim Smooth Auto, Fly Hack, 1 Hit Kill, Speed Epic, No Recoil 100% & Wallhack ({'Rootless' if is_rootless else 'Rootful'}).
 Maintainer: ikhozzzz
 Author: ikhozzzz & DoggyMod
 Section: Tweaks
