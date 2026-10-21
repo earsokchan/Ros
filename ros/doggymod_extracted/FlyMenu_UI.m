@@ -1279,18 +1279,30 @@ static void updateRowStates(void) {
         }
 
         // Aim State (Button 3)
+        static id s_keySwAim = NULL;
+        Class strCls = cls("NSString");
+        Class defsCls = cls("NSUserDefaults");
+        if (strCls && !s_keySwAim) {
+            s_keySwAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+        }
         BOOL aimOn = NO;
-        if (g_coreBtns[3]) {
+        if (defsCls && s_keySwAim) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                aimOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySwAim);
+            }
+        }
+        if (!aimOn && g_coreBtns[3]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            aimOn = (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
+            if (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3)) {
+                aimOn = YES;
+            }
         }
         setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
         // ESP State (Button 4)
         static id s_keySwEsp = NULL;
-        Class strCls = cls("NSString");
-        Class defsCls = cls("NSUserDefaults");
         if (strCls && !s_keySwEsp) {
             s_keySwEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
         }
@@ -2115,6 +2127,22 @@ static void setupMenuUI(id win, id panel) {
             }
         }
 
+        // For button 3 (Aimbot 360 Lock), cleanly remove raw FlyMenu_core targets and wire to custom toggleAimbot:
+        if (i == 3) {
+            id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
+            if (allTargets) {
+                id enumerator = ((id (*)(id, SEL))objc_msgSend)(allTargets, sel("objectEnumerator"));
+                if (enumerator) {
+                    id t;
+                    while ((t = ((id (*)(id, SEL))objc_msgSend)(enumerator, sel("nextObject")))) {
+                        ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), t, NULL, 0x0FFFFFFF);
+                    }
+                }
+            }
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAimbot:"), 1 << 6);
+        }
+
         // For button 4 (ESP), cleanly remove raw FlyMenu_core targets and wire to custom toggleEsp:
         if (i == 4) {
             id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
@@ -2218,6 +2246,31 @@ static BOOL runCombatPython(const char *cmd) {
     }
     PyGILState_Release(gstate);
     return ok;
+}
+
+// Aimbot 360 Lock (Button 3)
+static void toggleAimbot_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    char pyCmd[128];
+    snprintf(pyCmd, sizeof(pyCmd), "set_aim(%s)", newState ? "True" : "False");
+    runCombatPython(pyCmd);
+
+    printf("[FlyMenuUI] Aimbot 360 Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 // Aim Smooth 100% Auto (Button 10)
@@ -2907,7 +2960,7 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
             updateRowStates();
         }
 
-        // Periodically ensure Python combat module is synced with Aim Smooth setting
+        // Periodically ensure Python combat module is synced with Aim Smooth & Aimbot settings
         if (tickCount % 20 == 0) {
             Class defsCls = cls("NSUserDefaults");
             if (defsCls) {
@@ -2919,6 +2972,13 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
                         BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), k);
                         char pyCmd[128];
                         snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", cur ? "True" : "False");
+                        runCombatPython(pyCmd);
+                    }
+                    id kAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+                    if (kAim) {
+                        BOOL curAim = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
+                        char pyCmd[128];
+                        snprintf(pyCmd, sizeof(pyCmd), "set_aim(%s)", curAim ? "True" : "False");
                         runCombatPython(pyCmd);
                     }
                 }
@@ -3055,6 +3115,7 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleAimbot:"), (IMP)toggleAimbot_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("onFlyHudToggle:"), (IMP)onFlyHudToggle_imp, "v@:@");
@@ -3071,6 +3132,7 @@ static void initFlyMenuUI(void) {
     } else {
         uiMgrCls = cls("ROSUIManager");
         if (uiMgrCls) {
+            class_addMethod(uiMgrCls, sel("toggleAimbot:"), (IMP)toggleAimbot_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("onFlyHudToggle:"), (IMP)onFlyHudToggle_imp, "v@:@");

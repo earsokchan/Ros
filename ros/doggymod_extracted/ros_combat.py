@@ -518,16 +518,15 @@ def _is_using_gun(player, local_entity):
                     except Exception:
                         pass
 
-        # ===== STEP 6: Default to FALSE when no firearm is confirmed =====
-        # If no gun, slot 1-3, ammo, or firearm ID is found, player is using bare hands / unarmed.
-        # This prevents unwanted aimlock when walking/running with bare hands, allowing smooth scrolling.
-        _weapon_debug = 'no_gun_detected->False(Bare Hands)'
+        # ===== STEP 6: Default to TRUE so holding guns will never fail to lock =====
+        # Only explicit unarmed / melee / throwable indicators in Steps 1-5 return False.
+        _weapon_debug = 'fallback->True(Gun)'
         _log_weapon_debug(_weapon_debug)
-        return False
+        return True
     except Exception as e:
-        _weapon_debug = 'exception:%s->False' % str(e)
+        _weapon_debug = 'exception:%s->True' % str(e)
         _log_weapon_debug(_weapon_debug)
-        return False
+        return True
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
@@ -622,11 +621,8 @@ def handle(action):
             if not _aim and not _aim_smooth and not _esp:
                 _clear_frame()
         elif action == 'off':
-            _aim = False
-            _aim_state = 0
-            _target_id = None
-            if not _esp and not _aim_smooth:
-                _clear_frame()
+            # Do NOT reset _aim, _aim_smooth, or _esp on background tap / menu close!
+            pass
         else:
             raise ValueError('Unknown combat request')
         _last_error = ''
@@ -639,6 +635,24 @@ def handle(action):
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         return True
+
+
+def set_aim(val):
+    global _aim, _aim_state, _last_error, _target_id
+    try:
+        _aim = bool(val)
+        _aim_state = 1 if _aim else 0
+        if _aim:
+            _ensure_timer()
+        else:
+            _target_id = None
+            if not _esp and not _aim_smooth:
+                _clear_frame()
+                _stop_timer()
+        return _aim
+    except Exception as error:
+        _last_error = '%s: %s' % (type(error).__name__, error)
+        return False
 
 
 def set_esp(val):
@@ -832,7 +846,7 @@ def _tick():
                 # Aim Smooth auto-aims only when player is holding a firearm (gun)!
                 # If user has no gun (bare hands / fists / melee / throwables / running unholstered), do not aimsmooth.
                 using_gun = _is_using_gun(player, local_entity)
-                should_aim = (_aim_smooth and using_gun) or (_aim and _fire_held)
+                should_aim = _aim or (_aim_smooth and using_gun) or _fire_held
                 if not should_aim:
                     _target_id = None
                 else:
