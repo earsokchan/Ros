@@ -2602,10 +2602,6 @@ static void toggleEsp_imp(id self, SEL _cmd, id sender) {
     ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
     updateRowStates();
 
-    if (g_coreBtns[4]) {
-        ((msgSend_void_long)objc_msgSend)(g_coreBtns[4], sel("sendActionsForControlEvents:"), 1 << 6);
-    }
-
     char pyCmd[128];
     snprintf(pyCmd, sizeof(pyCmd), "set_esp(%s)", newState ? "True" : "False");
     runCombatPython(pyCmd);

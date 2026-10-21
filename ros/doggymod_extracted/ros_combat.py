@@ -532,19 +532,7 @@ def is_holding_gun():
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
-    try:
-        if Physics is None or RaycastHit is None:
-            return True
-        if not hasattr(Physics, 'RaycastWithScene'):
-            return True
-        direction = point - camera_position
-        distance = _finite(getattr(direction, 'magnitude', 0.0))
-        if distance <= 0.00001:
-            return False
-        hit = RaycastHit()
-        return not Physics.RaycastWithScene(camera_position, direction, hit, distance)
-    except Exception:
-        return True
+    return True
 
 
 def _extract_real_name(entity, go):
@@ -839,12 +827,7 @@ def _tick():
                     dist_val = math.sqrt(max(0.0, c[7]))
 
                     # can_shoot: target locked or in active crosshair view / closest visible
-                    can_shoot = bool(c[1] == _target_id)
-                    if not can_shoot and (c[0] <= 12.0 or i == 0):
-                        try:
-                            can_shoot = bool(_visible(Physics, RaycastHit, camera_position, point))
-                        except Exception:
-                            can_shoot = False
+                    can_shoot = bool(c[1] == _target_id or c[0] <= 15.0 or dist_val <= 25.0)
 
                     # Safe perspective bounding box calculation
                     box_h = max(0.016, min(0.85, 2.0 / (dist_val + 0.5)))
@@ -965,19 +948,13 @@ def _tick():
                         if retained:
                             pool = retained + [c for c in pool if c[1] != _clear_previous_target]
 
-                    # Immediate lock: Pass 1 finds closest visible enemy via direct physics raycast
+                    # Immediate lock: Pass 1 finds closest on-screen or forward enemy
                     selected = None
                     for candidate in pool[:10]:
-                        if _visible(Physics, RaycastHit, camera_position, candidate[4]):
+                        if candidate[9] or candidate[0] <= 60.0:
                             selected = candidate
                             break
-                    # Pass 2: if direct raycast fails (e.g. grass, leaves, fence, window), lock onto closest enemy on screen
-                    if selected is None:
-                        for candidate in pool[:8]:
-                            if candidate[9] or candidate[0] <= 80.0:
-                                selected = candidate
-                                break
-                    # Pass 3: fallback to closest pool enemy
+                    # Pass 2: fallback to closest pool enemy
                     if selected is None and pool:
                         selected = pool[0]
 
@@ -1052,12 +1029,16 @@ def _tick():
 
 def snapshot():
     global _esp_state, _aim_state, _last_error
-    if _esp or _aim or _aim_smooth:
+    if (_esp or _aim or _aim_smooth) and (_timer is None or time.time() - _last_tick > 3.0):
         try:
-            _tick()
-        except Exception:
-            pass
-    rows = _frame if _esp else ()
+            _stop_timer()
+            _ensure_timer()
+        except Exception as error:
+            _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
+            return '10,4,4,0'
+    age = time.time() - _frame_time
+    fresh = 0.0 <= age <= 3.0
+    rows = _frame if fresh and _esp else ()
     esp_state = 1 if _esp else 0
     aim_state = 1 if (_aim or _aim_smooth) else 0
     parts = ['10', str(esp_state), str(aim_state), str(len(rows))]
@@ -1071,10 +1052,16 @@ def esp_snapshot():
     global _esp, _last_esp_str, _frame_time, _last_error
     if not _esp:
         return 'NONE'
-    try:
-        _tick()
-    except Exception as error:
-        _last_error = 'ESP tick: %s: %s' % (type(error).__name__, error)
+    now = time.time()
+    if _timer is None or now - _last_tick > 3.0:
+        try:
+            _stop_timer()
+            _ensure_timer()
+        except Exception as error:
+            _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
+    age = now - _frame_time
+    if age < 0.0 or age > 3.0:
+        return 'NONE'
     return _last_esp_str or 'NONE'
 
 
