@@ -78,7 +78,9 @@ _scene_ready_ticks = 0
 # When it changes the engine has swapped the scene and the previous objects
 # may already be destroyed.
 _scene_fingerprint = None
-_ARM_TICKS = 20
+_scene_change_time = 0.0
+_MIN_SETTLE_SECONDS = 4.0
+_ARM_TICKS = 60
 _esp_state = 0
 _aim_state = 0
 _timer = None
@@ -184,18 +186,27 @@ def _angle_between(left, right):
 
 
 def _screen_point(camera, point, resolution, origin, forward):
-    xyz = _xyz(point)
-    direction = tuple(a - b for a, b in zip(xyz, origin))
-    # Check the actual camera forward; do not assume camera-space Z sign.
-    if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
+    try:
+        xyz = _xyz(point)
+        direction = tuple(a - b for a, b in zip(xyz, origin))
+        # Check the actual camera forward; do not assume camera-space Z sign.
+        if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
+            return None
+        _mark('combat:WorldToScreenPoint')
+        projected = camera.WorldToScreenPoint(point)
+        if projected is None:
+            return None
+        px = getattr(projected, 'x', None)
+        py = getattr(projected, 'y', None)
+        if px is None or py is None:
+            return None
+        x, y = _finite(px) / resolution[0], _finite(py) / resolution[1]
+        # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
+        if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
+            return None
+        return x, y, direction
+    except Exception:
         return None
-    _mark('combat:WorldToScreenPoint')
-    projected = camera.WorldToScreenPoint(point)
-    x, y = _finite(projected.x) / resolution[0], _finite(projected.y) / resolution[1]
-    # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
-    if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
-        return None
-    return x, y, direction
 
 
 def _enemy(go, player, service):
@@ -813,43 +824,67 @@ def _tick():
         character = None
         entity_id = None
         player = getattr(Globals, 'player', None)
-
-        # Scene stability guard: during the lobby -> match handover the old
-        # player object can be torn down while Globals.player still points at
-        # it. Require the same player and entity on two consecutive ticks
-        # before walking into the engine, so a half-destroyed object is never
-        # dereferenced.
-        observed_entity = getattr(player, 'entity', None) if player is not None else None
-        observed_entity_id = getattr(observed_entity, 'id', None) if observed_entity is not None else None
-        scene_stable = (player is not None and observed_entity_id is not None and
-                        player is _stable_player and observed_entity_id == _stable_entity_id)
-        _stable_player = player
-        _stable_entity_id = observed_entity_id
-
-        if _fly and scene_stable:
-            try:
-                target = _fly._target()
-                if target:
-                    unit, character, entity_id = target
-                    player = getattr(Globals, 'player', None) or player
-            except Exception:
-                pass
         if player is None:
             _waiting = 'Waiting for local player'
             _gun_state = -1
-            _scene_ready_ticks = 0
+            _scene_change_time = now
             _scene_fingerprint = None
+            _clear_frame()
+            _target_id = None
             return
+
         local_entity = getattr(player, 'entity', None)
         if local_entity is None:
             _waiting = 'Waiting for player.entity'
             _gun_state = -1
-            _scene_ready_ticks = 0
+            _scene_change_time = now
             _scene_fingerprint = None
+            _clear_frame()
+            _target_id = None
             return
 
-        # Crucial match eligibility check: player must have a valid physical character
-        # that is fully loaded and on foot (NOT in plane, NOT parachuting, NOT spectating).
+        entity_id = getattr(local_entity, 'id', None)
+        if entity_id is None:
+            _waiting = 'Waiting for entity.id'
+            _gun_state = -1
+            _scene_change_time = now
+            _scene_fingerprint = None
+            _clear_frame()
+            _target_id = None
+            return
+
+        # 1. IMMEDIATE SCENE TRANSITION CHECK (before touching any C++ components/interfaces)
+        fingerprint = (id(player), entity_id)
+        if fingerprint != _scene_fingerprint:
+            _scene_fingerprint = fingerprint
+            _scene_change_time = now
+            _waiting = 'Waiting for scene and character to finish loading'
+            _gun_state = -1
+            _clear_frame()
+            _target_id = None
+            return
+
+        # 2. MANDATORY SETTLING DELAY (4.0 seconds quiet period)
+        # Allows all textures, meshes, skeletons, and PhysX colliders to finish streaming.
+        elapsed = now - _scene_change_time
+        if elapsed < _MIN_SETTLE_SECONDS:
+            _waiting = 'Character loading... (%.1fs)' % max(0.1, _MIN_SETTLE_SECONDS - elapsed)
+            _gun_state = -1
+            _clear_frame()
+            _target_id = None
+            return
+
+        # 3. VERIFY GROUND CHARACTER & MOVEMENT ELIGIBILITY
+        unit = None
+        character = None
+        if _fly:
+            try:
+                target = _fly._target()
+                if target:
+                    unit, character, entity_id = target
+            except Exception:
+                pass
+
         if (unit is None or character is None or
                 not getattr(unit, 'chInScene', False) or
                 not getattr(unit, '_active', False) or
@@ -858,69 +893,59 @@ def _tick():
                 getattr(unit, '_observer', False)):
             _waiting = 'Waiting for active ground character (not in plane/parachute)'
             _gun_state = -1
-            _scene_ready_ticks = 0
-            _scene_fingerprint = None
             _clear_frame()
             _target_id = None
             return
 
-        # Bind the engine interfaces and read the current main camera. The
-        # camera is the first thing that disappears when the engine tears a
-        # scene down, so it is also the earliest warning that the objects we
-        # are holding may already be dead.
+        # 4. VERIFY CHARACTER WORLD POSITION IS NON-ZERO
+        try:
+            cpos = getattr(character, 'position', None)
+            if cpos is None or (abs(float(cpos.x)) < 0.001 and abs(float(cpos.y)) < 0.001 and abs(float(cpos.z)) < 0.001):
+                _waiting = 'Waiting for character 3D spawn'
+                _gun_state = -1
+                _clear_frame()
+                _target_id = None
+                return
+        except Exception:
+            return
+
+        # 5. VERIFY GAMEPLAY INPUT IS ACTIVE (loading screen dismissed)
+        try:
+            input_go = getattr(Globals, 'userInput', None)
+            if input_go is not None and hasattr(input_go, 'GetComponent'):
+                ic = input_go.GetComponent('InputInterpred')
+                if ic is not None and not getattr(ic, '_inputEnable', True):
+                    _waiting = 'Waiting for gameplay input to enable'
+                    _gun_state = -1
+                    _clear_frame()
+                    _target_id = None
+                    return
+        except Exception:
+            pass
+
+        # 6. BIND ENGINE INTERFACES & CAMERA
         Camera, monitor, service, get_point, game3d, Vector2, Physics, RaycastHit = _bindings()
         camera = getattr(Camera, 'main', None)
         if camera is None:
             _waiting = 'Waiting for main camera'
             _gun_state = -1
-            _scene_ready_ticks = 0
-            _scene_fingerprint = None
             _clear_frame()
             _target_id = None
             return
 
-        # Scene fingerprint: every value here changes when the engine swaps
-        # the scene. A change means the player we captured a moment ago may
-        # already have been destroyed, so this tick must not call into it.
-        fingerprint = (id(player), getattr(local_entity, 'id', None))
-        if fingerprint != _scene_fingerprint:
-            _scene_fingerprint = fingerprint
-            _scene_ready_ticks = 0
-            _waiting = 'Waiting for scene to settle'
-            _gun_state = -1
-            _clear_frame()
-            _target_id = None
-            return
-
-        # Hold off every engine call until the scene has been valid for a
-        # number of consecutive ticks. Right after a lobby -> match handover
-        # the engine is still tearing the old scene down, and calling into it
-        # during that window is what takes the game down.
-        _scene_ready_ticks += 1
-        if _scene_ready_ticks < _ARM_TICKS:
-            _waiting = 'Waiting for scene to settle'
-            _gun_state = -1
-            _clear_frame()
-            _target_id = None
-            return
-
-        if getattr(local_entity, 'deadInGame', False):
-            _esp_state = 3 if _esp else 0
-            _aim_state = 3 if _aim else 0
-            _waiting = 'Local character dead'
-            return
-        if entity_id is None:
-            entity_id = getattr(local_entity, 'id', None)
         owner = (id(player), entity_id)
         if owner != _owner:
             _clear_previous_target = None
             _owner = owner
+
         try:
             cam_tf = getattr(camera, 'transform', None)
             if cam_tf is None:
                 raise Waiting('Waiting for camera transform')
             camera_position = cam_tf.position
             cam_fwd = cam_tf.forward
+            if abs(float(camera_position.x)) < 0.001 and abs(float(camera_position.y)) < 0.001 and abs(float(camera_position.z)) < 0.001:
+                raise Waiting('Waiting for active camera spawn')
             origin, forward = _xyz(camera_position), _xyz(cam_fwd)
         except Exception:
             raise Waiting('Waiting for camera transform')
