@@ -1292,8 +1292,8 @@ static void updateAimSmoothHudState(void) {
                 btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.80, 0.55, 0.05, 0.92);
                 brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.80, 0.20, 0.85);
             } else {
-                // Holding a gun -> Active Aimlock + Auto Shoot!
-                aimText = "AIM+FIRE";
+                // Holding a gun -> Active Aimlock!
+                aimText = "AIM: ON";
                 btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
                 brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90);
             }
@@ -2230,7 +2230,7 @@ static void setupMenuUI(id win, id panel) {
         "Speed Epic VIP",
         "No Recoil 100% VIP",
         "Wallhack VIP",
-        "Aim Smooth & Auto Shoot (100m)",
+        "Aim Smooth (Auto Aim)",
         "Fly HUD (Outside Screen)"
     };
 
