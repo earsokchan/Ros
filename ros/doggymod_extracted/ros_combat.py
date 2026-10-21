@@ -194,6 +194,84 @@ def _screen_point(camera, point, resolution, origin, forward):
         return None
 
 
+def _is_vehicle(go, entity=None):
+    try:
+        if entity is None and go is not None:
+            entity = getattr(go, 'entity', None)
+
+        # 1. Check entity class name for vehicle/car/bike signatures
+        if entity is not None:
+            cname = getattr(entity, '__class__', None)
+            cname_str = getattr(cname, '__name__', '') if cname else ''
+            low_c = cname_str.lower()
+            if any(k in low_c for k in ('vehicle', 'car', 'bike', 'motor', 'bicycle', 'jeep',
+                                        'truck', 'boat', 'van', 'glider', 'plane', 'aircraft',
+                                        'hover', 'drivable', 'quad', 'scooter')):
+                return True
+            # Vehicle-specific attributes in Rules of Survival
+            if any(hasattr(entity, attr) for attr in ('driver', 'passengers', 'seat_count',
+                                                      'wheel_count', 'vehicle_id', 'vehicleId',
+                                                      'is_vehicle', 'drive', 'maxSpeed', 'curSpeed',
+                                                      'engine_rpm', 'steer_angle')):
+                return True
+
+        # 2. Check GameObject name for vehicle signatures
+        if go is not None:
+            gname = getattr(go, 'name', '') or ''
+            low_g = gname.lower()
+            if any(k in low_g for k in ('vehicle', 'car', 'bike', 'motor', 'bicycle', 'jeep',
+                                        'truck', 'boat', 'van', 'glider', 'plane', 'aircraft',
+                                        'sports_car', 'drivable', 'quad', 'scooter', 'pickup')):
+                return True
+            # Check GameObject components
+            if hasattr(go, 'GetComponent'):
+                try:
+                    for comp in ('Vehicle', 'VehicleEntity', 'CarController', 'BikeController',
+                                 'MotorController', 'VehicleController', 'DrivableVehicle'):
+                        if go.GetComponent(comp) is not None:
+                            return True
+                except Exception:
+                    pass
+        return False
+    except Exception:
+        return False
+
+
+def _is_enemy_character(go, entity, service):
+    try:
+        if _is_vehicle(go, entity):
+            return False
+
+        # ServiceAPI classification
+        if service is not None:
+            try:
+                if callable(getattr(service, 'isVehicle', None)) and service.isVehicle(entity):
+                    return False
+            except Exception:
+                pass
+            is_av = bool(service.isAvatar(entity)) if callable(getattr(service, 'isAvatar', None)) else False
+            is_rb = bool(service.isRobot(entity)) if callable(getattr(service, 'isRobot', None)) else False
+            if is_av or is_rb:
+                return True
+
+        # Fallback check on class and object name
+        cname = getattr(entity, '__class__', None)
+        cname_str = getattr(cname, '__name__', '') if cname else ''
+        go_name = getattr(go, 'name', '') or ''
+        combined = (cname_str + ' ' + go_name).lower()
+        if any(k in combined for k in ('avatar', 'player', 'robot', 'human', 'npc', 'character', 'combatunit', 'actor')):
+            return True
+
+        # Character-specific attributes in Rules of Survival
+        if any(hasattr(entity, attr) for attr in ('role_name', 'roleName', 'nickname', 'campType',
+                                                  'isBattleMate', 'is_downed', 'isDowned', 'isKnocked')):
+            return True
+
+        return False
+    except Exception:
+        return True
+
+
 def _enemy(go, player, service):
     try:
         if go is None:
@@ -206,41 +284,50 @@ def _enemy(go, player, service):
         entity = getattr(go, 'entity', None)
         local = getattr(player, 'entity', None) if player is not None else None
 
-        if entity is not None and local is not None:
-            eid = getattr(entity, 'id', None)
-            lid = getattr(local, 'id', None)
-            if eid is not None and lid is not None and eid == lid:
-                return False
+        if entity is None or local is None:
+            return False
 
-            # Teammate check via live engine method
-            if callable(getattr(local, 'isBattleMate', None)):
-                try:
-                    if eid is not None and local.isBattleMate(eid):
-                        return False
-                except Exception:
-                    pass
+        eid = getattr(entity, 'id', None)
+        lid = getattr(local, 'id', None)
+        if eid is not None and lid is not None and eid == lid:
+            return False
 
-            # Camp check: only compare when both camp types are valid positive teams
-            camp_e = getattr(entity, 'campType', None)
-            camp_l = getattr(local, 'campType', None)
-            if camp_e is not None and camp_l is not None:
-                try:
-                    ce = int(camp_e)
-                    cl = int(camp_l)
-                    if ce > 0 and cl > 0 and ce == cl:
-                        return False
-                except Exception:
-                    pass
+        # Strictly filter out vehicles (cars, bikes, motorcycles, trucks, etc.)
+        if _is_vehicle(go, entity):
+            return False
 
-            # Dead check: only reject if actually dead in game (turned to loot box)
-            # Downed / knocked / crawling players have hp == 0 but deadInGame == False!
-            if getattr(entity, 'deadInGame', False):
-                return False
+        # Only target enemy characters (avatars / player bots)
+        if not _is_enemy_character(go, entity, service):
+            return False
 
-        # Objects coming from monitor.allEnemys() that passed teammate checks are valid targets
+        # Teammate check via live engine method
+        if callable(getattr(local, 'isBattleMate', None)):
+            try:
+                if eid is not None and local.isBattleMate(eid):
+                    return False
+            except Exception:
+                pass
+
+        # Camp check: only compare when both camp types are valid positive teams
+        camp_e = getattr(entity, 'campType', None)
+        camp_l = getattr(local, 'campType', None)
+        if camp_e is not None and camp_l is not None:
+            try:
+                ce = int(camp_e)
+                cl = int(camp_l)
+                if ce > 0 and cl > 0 and ce == cl:
+                    return False
+            except Exception:
+                pass
+
+        # Dead check: only reject if actually dead in game (turned to loot box)
+        # Downed / knocked / crawling players have hp == 0 but deadInGame == False!
+        if getattr(entity, 'deadInGame', False):
+            return False
+
         return True
     except Exception:
-        return True
+        return False
 
 _weapon_debug = ''  # diagnostic string for weapon detection state
 
@@ -941,7 +1028,7 @@ def _tick():
                             or getattr(control, 'controller', None) is not None):
                         raise Waiting('Unsupported live camera controller')
                     # Prioritize closest enemy to player character (20m before 100m)
-                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
+                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not _is_vehicle(c[6])]
                     # When shooting, retain locked target so sprays remain consistent on the target
                     if _fire_held and _clear_previous_target is not None:
                         retained = [c for c in pool if c[1] == _clear_previous_target]
@@ -970,7 +1057,7 @@ def _tick():
                             except Exception:
                                 is_inv = False
                         is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
-                        if not _enemy(selected[6], player, service) or is_inv:
+                        if not _enemy(selected[6], player, service) or is_inv or _is_vehicle(selected[6]):
                             selected = None
                             _target_id = None
                         else:
