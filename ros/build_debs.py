@@ -23,6 +23,9 @@ def build_deb(is_rootless, out_name):
 Name: Ros_ikhozzzz VIP ({'v2 - Rootless' if is_rootless else 'v1 - Rootful'})
 Depends: mobilesubstrate
 Architecture: iphoneos-arm64
+Replaces: com.doggymod.ros
+Conflicts: com.doggymod.ros
+Provides: com.doggymod.ros
 Description: Rules of Survival VIP Mod Menu (Ros_ikhozzzz {'v2' if is_rootless else 'v1'}) with Floating Logo, Close [X] Button, Aimbot 360, ESP Laser & Box, Fly Hack, 1 Hit Kill, Speed Epic, No Recoil 100% & Wallhack ({'Rootless' if is_rootless else 'Rootful'}).
 Maintainer: ikhozzzz
 Author: ikhozzzz & DoggyMod
@@ -97,7 +100,7 @@ exit 0
 
 # Update 1: Rootful -> Ros_ikhozzzz_v1.deb (and aliases)
 build_deb(is_rootless=False, out_name='Ros_ikhozzzz_v1.deb')
-for extra in ['Ros_ikhozzzz_rootful_v1.deb', 'ROS_Doggymod_rootful.deb']:
+for extra in ['Ros_ikhozzzz_rootful_v1.deb', 'Ros_ikhozzzz.deb', 'ROS_Doggymod_rootful.deb']:
     shutil.copy(os.path.join(ros_dir, 'Ros_ikhozzzz_v1.deb'), os.path.join(ros_dir, extra))
     shutil.copy(os.path.join(ros_dir, 'Ros_ikhozzzz_v1.deb'), os.path.join(workspace_dir, extra))
 

@@ -86,6 +86,7 @@ static id g_espRedBoxLayer = NULL;
 static id g_espGreenBoxLayer = NULL;
 #define MAX_ESP_LABELS 64
 static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
+static BOOL g_espActive = NO;
 static id g_infoModal = NULL;
 
 // On-screen Floating Fly HUD Globals
@@ -152,7 +153,21 @@ static id getDocumentsPath(const char *filename) {
 static id ensureAndGetScriptPath(const char *filename, const unsigned char *data, unsigned int len) {
     Class nsString = cls("NSString");
 
-    // 1. Check main bundle
+    // 1. Always write latest embedded script to Documents directory (100% writable inside app sandbox)
+    id docPathObj = getDocumentsPath(filename);
+    if (docPathObj) {
+        const char *cPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
+        if (cPath) {
+            FILE *f = fopen(cPath, "wb");
+            if (f) {
+                fwrite(data, 1, len, f);
+                fclose(f);
+                return docPathObj;
+            }
+        }
+    }
+
+    // 2. Check main bundle
     Class nsBundle = cls("NSBundle");
     if (nsBundle) {
         id mb = ((id (*)(id, SEL))objc_msgSend)((id)nsBundle, sel("mainBundle"));
@@ -171,7 +186,7 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
         }
     }
 
-    // 2. Check existing tweak locations
+    // 3. Check existing tweak locations
     const char *candPaths[] = {
         "/Library/Application Support/ROS_Doggymod",
         "/var/jb/Library/Application Support/ROS_Doggymod",
@@ -189,30 +204,11 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
         }
     }
 
-    // 3. Write embedded script to Documents directory (100% writable inside app sandbox)
-    id docPathObj = getDocumentsPath(filename);
-    if (docPathObj) {
-        const char *cPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
-        if (cPath) {
-            FILE *f = fopen(cPath, "wb");
-            if (f) {
-                fwrite(data, 1, len, f);
-                fclose(f);
-            }
-            return docPathObj;
-        }
-    }
-    return NULL;
+    return docPathObj;
 }
 
 // 100% crash-safe -[NSBundle pathForResource:ofType:] swizzle
 static id custom_pathForResource(id self, SEL _cmd, id name, id ext) {
-    id orig = NULL;
-    if (orig_pathForResource) {
-        orig = orig_pathForResource(self, _cmd, name, ext);
-    }
-    if (orig != NULL) return orig;
-
     if (name != NULL && ext != NULL) {
         Class strCls = cls("NSString");
         if (strCls &&
@@ -232,7 +228,11 @@ static id custom_pathForResource(id self, SEL _cmd, id name, id ext) {
             }
         }
     }
-    return orig;
+
+    if (orig_pathForResource) {
+        return orig_pathForResource(self, _cmd, name, ext);
+    }
+    return NULL;
 }
 
 static id getActiveWindow(void) {
@@ -1407,6 +1407,7 @@ static void updateRowStates(void) {
                 espOn = YES;
             }
         }
+        g_espActive = espOn;
         setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
         // Info button (Button 5)
@@ -2436,6 +2437,10 @@ static BOOL runCombatPython(const char *cmd) {
     }
     if (!foundCore) return NO;
 
+    uint8_t *pCombatFailed = (uint8_t *)(coreSlide + 0xc164);
+    if (pCombatFailed && *pCombatFailed == 1) {
+        *pCombatFailed = 0;
+    }
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
     if (!pCombatReady || *pCombatReady != 1) {
         int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
@@ -2592,9 +2597,14 @@ static void toggleEsp_imp(id self, SEL _cmd, id sender) {
     BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
     BOOL newState = !cur;
 
+    g_espActive = newState;
     ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
     ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
     updateRowStates();
+
+    if (g_coreBtns[4]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[4], sel("sendActionsForControlEvents:"), 1 << 6);
+    }
 
     char pyCmd[128];
     snprintf(pyCmd, sizeof(pyCmd), "set_esp(%s)", newState ? "True" : "False");
@@ -2739,10 +2749,14 @@ static char *getESPSnapshot(void) {
     if (!foundCore) return NULL;
 
     // Check if FlyMenu_core's combat engine has successfully initialized and is ready
+    uint8_t *pCombatFailed = (uint8_t *)(coreSlide + 0xc164);
+    if (pCombatFailed && *pCombatFailed == 1) {
+        *pCombatFailed = 0;
+    }
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
     if (!pCombatReady || *pCombatReady != 1) {
         static int s_attemptInit = 0;
-        if (++s_attemptInit % 30 == 1) {
+        if (++s_attemptInit % 10 == 1) {
             int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
             if (ensureCombat) {
                 ensureCombat();
@@ -2967,24 +2981,30 @@ static void updateESPOverlay(id win) {
     if (g_espGreenBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenBoxLayer, sel("setFrame:"), winBounds);
 
     // Check if ESP is ON in core button or persisted preferences
-    BOOL espActive = NO;
-    Class defsCls = cls("NSUserDefaults");
-    if (defsCls) {
-        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-        if (defs) {
-            Class strCls = cls("NSString");
-            if (strCls) {
-                id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
-                if (key) {
-                    espActive = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-                }
-            }
-        }
-    }
+    BOOL espActive = g_espActive;
     if (!espActive && g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
         espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
+    }
+    if (!espActive) {
+        static id s_espKey = NULL;
+        Class defsCls = cls("NSUserDefaults");
+        if (defsCls) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                if (!s_espKey) {
+                    Class strCls = cls("NSString");
+                    if (strCls) {
+                        s_espKey = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+                    }
+                }
+                if (s_espKey) {
+                    espActive = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_espKey);
+                    g_espActive = espActive;
+                }
+            }
+        }
     }
 
     // If ESP is disabled, clear layers and return immediately without querying Python on CADisplayLink
@@ -3004,7 +3024,7 @@ static void updateESPOverlay(id win) {
     static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
         s_emptyFrames++;
-        if (s_emptyFrames > 6) {
+        if (s_emptyFrames >= 2) {
             if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
             if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
             if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -3160,19 +3180,23 @@ static void updateESPOverlay(id win) {
     }
 
     if (g_espRedLineLayer && redLineP) {
-        id cgP = ((id (*)(id, SEL))objc_msgSend)(redLineP, sel("CGPath"));
+        BOOL empty = (BOOL)((long (*)(id, SEL))objc_msgSend)(redLineP, sel("isEmpty"));
+        id cgP = empty ? NULL : ((id (*)(id, SEL))objc_msgSend)(redLineP, sel("CGPath"));
         ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), cgP);
     }
     if (g_espGreenLineLayer && greenLineP) {
-        id cgP = ((id (*)(id, SEL))objc_msgSend)(greenLineP, sel("CGPath"));
+        BOOL empty = (BOOL)((long (*)(id, SEL))objc_msgSend)(greenLineP, sel("isEmpty"));
+        id cgP = empty ? NULL : ((id (*)(id, SEL))objc_msgSend)(greenLineP, sel("CGPath"));
         ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), cgP);
     }
     if (g_espRedBoxLayer && redBoxP) {
-        id cgP = ((id (*)(id, SEL))objc_msgSend)(redBoxP, sel("CGPath"));
+        BOOL empty = (BOOL)((long (*)(id, SEL))objc_msgSend)(redBoxP, sel("isEmpty"));
+        id cgP = empty ? NULL : ((id (*)(id, SEL))objc_msgSend)(redBoxP, sel("CGPath"));
         ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), cgP);
     }
     if (g_espGreenBoxLayer && greenBoxP) {
-        id cgP = ((id (*)(id, SEL))objc_msgSend)(greenBoxP, sel("CGPath"));
+        BOOL empty = (BOOL)((long (*)(id, SEL))objc_msgSend)(greenBoxP, sel("isEmpty"));
+        id cgP = empty ? NULL : ((id (*)(id, SEL))objc_msgSend)(greenBoxP, sel("CGPath"));
         ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), cgP);
     }
 

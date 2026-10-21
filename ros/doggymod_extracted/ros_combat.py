@@ -24,8 +24,27 @@ if _fly is None:
 Globals = sys.modules.get('Globals')
 if Globals is None and _fly:
     Globals = getattr(_fly, 'Globals', None)
-Timer = getattr(_fly, 'Timer', None) if _fly else None
 _movement = getattr(_fly, '_movement', None) if _fly else None
+
+
+def _resolve_game_timer():
+    candidates = (
+        getattr(_fly, 'Timer', None) if _fly else None,
+        getattr(_movement, 'Timer', None) if _movement else None,
+        sys.modules.get('common.Timer'),
+        getattr(sys.modules.get('common'), 'Timer', None),
+        getattr(Globals, 'Timer', None),
+    )
+    for candidate in candidates:
+        if (candidate and callable(getattr(candidate, 'addRepeatTimer', None)) and
+                callable(getattr(candidate, 'delTimer', None))):
+            return candidate
+    return None
+
+
+Timer = getattr(_fly, 'Timer', None) if _fly else None
+if Timer is None:
+    Timer = _resolve_game_timer()
 _esp = False
 _aim = False
 _aim_smooth = False
@@ -143,26 +162,32 @@ def _angle_between(left, right):
 
 def _screen_point(camera, point, resolution, origin, forward):
     try:
-        xyz = _xyz(point)
-        direction = tuple(a - b for a, b in zip(xyz, origin))
-        # Check the actual camera forward; do not assume camera-space Z sign.
-        if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
-            return None
         projected = camera.WorldToScreenPoint(point)
         if projected is None:
             return None
         pz = getattr(projected, 'z', None)
-        if pz is not None and float(pz) <= 0.0001:
+        if pz is not None and float(pz) <= 0.05:
             return None
         px = getattr(projected, 'x', None)
         py = getattr(projected, 'y', None)
         if px is None or py is None:
             return None
-        x = _finite(px) / resolution[0]
-        # Invert Y from Unity bottom-left (0,0) to UIKit top-left (0,0)
-        y = 1.0 - (_finite(py) / resolution[1])
-        # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
-        if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
+        res_w, res_h = resolution[0], resolution[1]
+        px_val, py_val = _finite(px), _finite(py)
+        if res_w > 1.0 and px_val > res_w * 1.5:
+            scale = round(float(px_val) / res_w)
+            if scale < 1.0:
+                scale = 1.0
+            x = px_val / (res_w * scale)
+            y = py_val / (res_h * scale)
+        else:
+            x = px_val / res_w
+            y = py_val / res_h
+        if not (-0.5 <= x <= 1.5 and -0.5 <= y <= 1.5):
+            return None
+        xyz = _xyz(point)
+        direction = tuple(a - b for a, b in zip(xyz, origin))
+        if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
             return None
         return x, y, direction
     except Exception:
@@ -568,8 +593,10 @@ def _clear_frame():
 
 
 def _ensure_timer():
-    global _timer, _last_tick
-    if _timer is None:
+    global _timer, _last_tick, Timer
+    if Timer is None:
+        Timer = _resolve_game_timer()
+    if _timer is None and Timer is not None:
         try:
             _timer = Timer.addRepeatTimer(0.010, _tick)
             _last_tick = time.time()
@@ -695,13 +722,14 @@ def _tick():
         unit = None
         character = None
         entity_id = None
-        player = getattr(Globals, 'player', None)
+        Globals_mod = sys.modules.get('Globals') or Globals
+        player = getattr(Globals_mod, 'player', None) or getattr(Globals_mod, 'local_player', None)
         if _fly:
             try:
                 target = _fly._target()
                 if target:
                     unit, character, entity_id = target
-                    player = getattr(Globals, 'player', None) or player
+                    player = getattr(Globals_mod, 'player', None) or player
             except Exception:
                 pass
         if player is None:
@@ -709,8 +737,11 @@ def _tick():
             return
         local_entity = getattr(player, 'entity', None)
         if local_entity is None:
-            _waiting = 'Waiting for player.entity'
-            return
+            if hasattr(player, 'id') or hasattr(player, 'campType'):
+                local_entity = player
+            else:
+                _waiting = 'Waiting for player.entity'
+                return
         if getattr(local_entity, 'deadInGame', False):
             _esp_state = 3 if _esp else 0
             _aim_state = 3 if _aim else 0
@@ -723,13 +754,25 @@ def _tick():
             _clear_previous_target = None
             _owner = owner
         Camera, monitor, service, get_point, game3d, Vector2, Physics, RaycastHit = _bindings()
-        camera = getattr(Camera, 'main', None)
+        camera = getattr(Camera, 'main', None) or getattr(Camera, 'current', None)
+        if camera is None:
+            try:
+                all_cams = getattr(Camera, 'allCameras', None)
+                if all_cams and len(all_cams) > 0:
+                    camera = all_cams[0]
+            except Exception:
+                pass
         if camera is None:
             raise Waiting('Waiting for main camera')
         camera_position = camera.transform.position
         origin, forward = _xyz(camera_position), _xyz(camera.transform.forward)
-        size = game3d.get_window_size()
-        resolution = (_finite(size[0]), _finite(size[1]))
+        pw = getattr(camera, 'pixelWidth', None)
+        ph = getattr(camera, 'pixelHeight', None)
+        if pw and ph and float(pw) > 10.0 and float(ph) > 10.0:
+            resolution = (float(pw), float(ph))
+        else:
+            size = game3d.get_window_size()
+            resolution = (_finite(size[0]), _finite(size[1]))
         if min(resolution) <= 1.0:
             raise Waiting('Waiting for game window resolution')
         candidates = []
@@ -1009,24 +1052,14 @@ def _tick():
 
 def snapshot():
     global _esp_state, _aim_state, _last_error
-    if (_esp or _aim or _aim_smooth) and (_timer is None or time.time() - _last_tick > 3.0):
+    if _esp or _aim or _aim_smooth:
         try:
-            _stop_timer()
-            _ensure_timer()
-        except Exception as error:
-            _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
-            return '10,4,4,0'
-    age = time.time() - _frame_time
-    fresh = 0.0 <= age <= 3.0
-    rows = _frame if fresh and _esp else ()
-    if not _esp:
-        esp_state = 0
-    else:
-        esp_state = 2 if _esp_state == 1 and not fresh else _esp_state
-    if not _aim:
-        aim_state = 0
-    else:
-        aim_state = 2 if _aim_state in (1, 5) and not fresh else _aim_state
+            _tick()
+        except Exception:
+            pass
+    rows = _frame if _esp else ()
+    esp_state = 1 if _esp else 0
+    aim_state = 1 if (_aim or _aim_smooth) else 0
     parts = ['10', str(esp_state), str(aim_state), str(len(rows))]
     for x, y, locked in rows:
         parts.extend((str(int(x * 10000.0 + 0.5)), str(int(y * 10000.0 + 0.5)),
@@ -1038,16 +1071,10 @@ def esp_snapshot():
     global _esp, _last_esp_str, _frame_time, _last_error
     if not _esp:
         return 'NONE'
-    now = time.time()
-    if _timer is None or now - _last_tick > 3.0:
-        try:
-            _stop_timer()
-            _ensure_timer()
-        except Exception as error:
-            _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
-    age = now - _frame_time
-    if age < 0.0 or age > 3.0:
-        return 'NONE'
+    try:
+        _tick()
+    except Exception as error:
+        _last_error = 'ESP tick: %s: %s' % (type(error).__name__, error)
     return _last_esp_str or 'NONE'
 
 
