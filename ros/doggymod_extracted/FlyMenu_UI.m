@@ -84,7 +84,7 @@ static id g_espRedLineLayer = NULL;
 static id g_espGreenLineLayer = NULL;
 static id g_espRedBoxLayer = NULL;
 static id g_espGreenBoxLayer = NULL;
-#define MAX_ESP_LABELS 32
+#define MAX_ESP_LABELS 64
 static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
 static id g_infoModal = NULL;
 
@@ -1318,48 +1318,45 @@ static void updateAimSmoothHudState(void) {
     }
 
     int gunHolding = checkPlayerHoldingGun();
-    // Automatic Gun Detection:
-    // When avatar is holding a gun (1): AIM: ON (active aimlock, neon coral glow)
-    // When avatar is NOT holding a gun (0) (bare hands / fists / head): AIM: OFF (free camera scrolling)
-    BOOL isAimActive = NO;
-    if (aimSmoothEnabled) {
-        if (gunHolding == 1) {
-            isAimActive = YES;
-        } else if (gunHolding == 0) {
-            isAimActive = NO;
-        } else {
-            // Still loading / lobby: default to inactive until gun confirmed
-            isAimActive = NO;
-        }
-    } else {
-        isAimActive = NO;
-    }
 
-    id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
-    id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
-    id whiteColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 1.0, 1.0, 1.0);
-    id knobOffColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.55, 0.65, 1.0);
-    id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.35, 0.45, 0.85);
-    id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+    // Menu Row 10 switch reflects the user's persisted setting (ON or OFF)
+    id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
+    id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.15, 0.15, 0.18, 1.0);
+    id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
+    id knobOffColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.50, 0.55, 1.0);
+    id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
+    id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.14, 0.14, 0.18, 1.0);
 
-    setSwitchState(10, isAimActive, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+    setSwitchState(10, aimSmoothEnabled, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
     // Update on-screen floating Aim Smooth HUD button state
     if (g_aimHudToggleBtn) {
-        const char *aimText = isAimActive ? "AIM: ON" : "AIM: OFF";
+        const char *aimText = "AIM: OFF";
+        id btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+        id brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+
+        if (aimSmoothEnabled) {
+            if (gunHolding == 0) {
+                // Bare hands / fists / head -> Free camera scrolling!
+                aimText = "AIM: IDLE";
+                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.80, 0.55, 0.05, 0.92);
+                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.80, 0.20, 0.85);
+            } else {
+                // Holding a gun -> Active Aimlock!
+                aimText = "AIM: ON";
+                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
+                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90);
+            }
+        }
+
         id aimTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
         ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), aimTitle, 0);
-
-        id btnBg = isAimActive ? onPillBg : offPillBg;
-        if (btnBg) ((msgSend_void_id)objc_msgSend)(g_aimHudToggleBtn, sel("setBackgroundColor:"), btnBg);
+        ((msgSend_void_id)objc_msgSend)(g_aimHudToggleBtn, sel("setBackgroundColor:"), btnBg);
 
         id tLayer = ((id (*)(id, SEL))objc_msgSend)(g_aimHudToggleBtn, sel("layer"));
         if (tLayer) {
-            id brdColor = isAimActive ? activeBorder : normalBorder;
-            if (brdColor) {
-                id cgBrd = ((id (*)(id, SEL))objc_msgSend)(brdColor, sel("CGColor"));
-                ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgBrd);
-            }
+            id cgBrd = ((id (*)(id, SEL))objc_msgSend)(brdColor, sel("CGColor"));
+            ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgBrd);
         }
     }
 }
@@ -3175,7 +3172,7 @@ static void updateESPOverlay(id win) {
     static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
         s_emptyFrames++;
-        if (s_emptyFrames > 45) {
+        if (s_emptyFrames > 6) {
             if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
             if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
             if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -3216,46 +3213,67 @@ static void updateESPOverlay(id win) {
         char *token = strtok_r(snapStr, ";", &savePtr);
         while (token && labelIdx < MAX_ESP_LABELS) {
             int canShoot = 0, lx = 0, ly = 0, bx = 0, by = 0, bw = 0, bh = 0, dist = 0;
-            char nameBuf[64] = { 0 };
+            char nameBuf[64] = "Player";
 
-            if (sscanf(token, "%d,%d,%d,%d,%d,%d,%d,%d,%63s",
-                       &canShoot, &lx, &ly, &bx, &by, &bw, &bh, &dist, nameBuf) >= 9) {
-                double s_bx = (double)bx / 10000.0 * winW;
-                double s_by = (double)by / 10000.0 * winH;
-                double s_bw = (double)bw / 10000.0 * winW;
-                double s_bh = (double)bh / 10000.0 * winH;
-
-                // Snapline from top-center to top of enemy bounding box
-                id lineTarget = canShoot ? greenLineP : redLineP;
-                ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("moveToPoint:"), CGPointMake(startX, startY));
-                ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("addLineToPoint:"), CGPointMake(s_bx + s_bw * 0.5, s_by));
-
-                // Bounding box
-                id boxTarget = canShoot ? greenBoxP : redBoxP;
-                id rectP = ((msgSend_id_rect)objc_msgSend)((id)pathCls, sel("bezierPathWithRect:"), CGRectMake(s_bx, s_by, s_bw, s_bh));
-                if (rectP) {
-                    ((msgSend_void_id)objc_msgSend)(boxTarget, sel("appendPath:"), rectP);
+            char *p = token;
+            char *comma = strchr(p, ','); if (comma) { canShoot = atoi(p); p = comma + 1; }
+            comma = strchr(p, ','); if (comma) { lx = atoi(p); p = comma + 1; }
+            comma = strchr(p, ','); if (comma) { ly = atoi(p); p = comma + 1; }
+            comma = strchr(p, ','); if (comma) { bx = atoi(p); p = comma + 1; }
+            comma = strchr(p, ','); if (comma) { by = atoi(p); p = comma + 1; }
+            comma = strchr(p, ','); if (comma) { bw = atoi(p); p = comma + 1; }
+            comma = strchr(p, ','); if (comma) { bh = atoi(p); p = comma + 1; }
+            comma = strchr(p, ',');
+            if (comma) {
+                dist = atoi(p);
+                p = comma + 1;
+                if (*p) {
+                    strncpy(nameBuf, p, sizeof(nameBuf) - 1);
+                    nameBuf[sizeof(nameBuf) - 1] = '\0';
                 }
+            }
 
-                // Real Name & distance badge
-                if (labelIdx < MAX_ESP_LABELS && g_espTextLayers[labelIdx]) {
-                    id tLayer = g_espTextLayers[labelIdx];
-                    char tagStr[96];
-                    snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
-                    id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
+            for (char *c = nameBuf; *c; c++) {
+                if (*c == '_') *c = ' ';
+            }
 
-                    double tagW = strlen(tagStr) * 6.5 + 14.0;
-                    if (tagW < 60.0) tagW = 60.0;
-                    double tagH = 14.0;
-                    double tagX = s_bx + (s_bw - tagW) * 0.5;
-                    double tagY = s_by - tagH - 2.0;
-                    if (tagY < 20.0) tagY = s_by + s_bh + 2.0;
+            double s_bx = (double)bx / 10000.0 * winW;
+            double s_by = (double)by / 10000.0 * winH;
+            double s_bw = (double)bw / 10000.0 * winW;
+            double s_bh = (double)bh / 10000.0 * winH;
+            if (s_bw < 8.0) s_bw = 8.0;
+            if (s_bh < 16.0) s_bh = 16.0;
 
-                    ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(tagX, tagY, tagW, tagH));
-                    if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
-                    ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 0);
-                    labelIdx++;
-                }
+            // Snapline from top-center to top of enemy bounding box
+            id lineTarget = canShoot ? greenLineP : redLineP;
+            ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("moveToPoint:"), CGPointMake(startX, startY));
+            ((msgSend_void_pt)objc_msgSend)(lineTarget, sel("addLineToPoint:"), CGPointMake(s_bx + s_bw * 0.5, s_by));
+
+            // Bounding box
+            id boxTarget = canShoot ? greenBoxP : redBoxP;
+            id rectP = ((msgSend_id_rect)objc_msgSend)((id)pathCls, sel("bezierPathWithRect:"), CGRectMake(s_bx, s_by, s_bw, s_bh));
+            if (rectP) {
+                ((msgSend_void_id)objc_msgSend)(boxTarget, sel("appendPath:"), rectP);
+            }
+
+            // Real Name & distance badge
+            if (labelIdx < MAX_ESP_LABELS && g_espTextLayers[labelIdx]) {
+                id tLayer = g_espTextLayers[labelIdx];
+                char tagStr[96];
+                snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
+                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
+
+                double tagW = strlen(tagStr) * 6.5 + 14.0;
+                if (tagW < 60.0) tagW = 60.0;
+                double tagH = 14.0;
+                double tagX = s_bx + (s_bw - tagW) * 0.5;
+                double tagY = s_by - tagH - 2.0;
+                if (tagY < 20.0) tagY = s_by + s_bh + 2.0;
+
+                ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(tagX, tagY, tagW, tagH));
+                if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
+                ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 0);
+                labelIdx++;
             }
             token = strtok_r(NULL, ";", &savePtr);
         }
