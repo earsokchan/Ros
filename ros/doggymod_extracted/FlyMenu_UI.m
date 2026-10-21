@@ -93,7 +93,16 @@ static id g_flyHudView = NULL;
 static id g_flyHudToggleBtn = NULL;
 static id g_flyHudUpBtn = NULL;
 static id g_flyHudDownBtn = NULL;
+static id g_flyHudSpeedBtn = NULL;
 static void ensureFloatingFlyHUD(id win);
+
+// Speed Epic Multipliers & Stepper Definitions (Up to 20x, with dedicated 10x level)
+static const double s_speedMultipliers[] = { 1.0, 2.0, 4.0, 7.0, 10.0, 15.0, 20.0 };
+static const char *s_speedNames[] = { "OFF", "2x", "4x", "7x", "10x", "15x", "20x" };
+static const int s_numSpeedLevels = 7;
+static int getSpeedEpicLevel(void);
+static void applySpeedEpicLevel(int level);
+static BOOL runFlyPython(const char *cmd);
 
 // On-screen Floating Aim Smooth HUD Globals
 static id g_aimHudView = NULL;
@@ -725,30 +734,79 @@ static void toggleOneHit_imp(id self, SEL _cmd, id sender) {
     printf("[FlyMenuUI] 1 Hit Kill VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
-// Speed Epic VIP Toggle (Button 7)
-static void toggleSpeedEpic_imp(id self, SEL _cmd, id sender) {
+// Speed Epic VIP Multi-Level Controller (Button 7 & Floating HUD)
+static int getSpeedEpicLevel(void) {
     Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
+    if (!defsCls) return 0;
     id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
-
+    if (!defs) return 0;
     Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
-    if (!key) return;
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6_level");
+    if (!key) return 0;
+    id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), key);
+    if (!val) {
+        id kOld = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
+        BOOL oldOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kOld);
+        return oldOn ? 4 : 0; // Default to 10x if previously on
+    }
+    long lvl = (long)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("integerForKey:"), key);
+    if (lvl < 0) lvl = 0;
+    if (lvl >= s_numSpeedLevels) lvl = s_numSpeedLevels - 1;
+    return (int)lvl;
+}
 
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
+static void applySpeedEpicLevel(int level) {
+    if (level < 0) level = 0;
+    if (level >= s_numSpeedLevels) level = s_numSpeedLevels - 1;
 
-    // Immediately save state synchronously so UI updates instantly with zero latency
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    Class defsCls = cls("NSUserDefaults");
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        Class strCls = cls("NSString");
+        if (defs && strCls) {
+            id keyLvl = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6_level");
+            if (keyLvl) ((void (*)(id, SEL, long, id))objc_msgSend)(defs, sel("setInteger:forKey:"), (long)level, keyLvl);
+            id keySw6 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
+            if (keySw6) ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), (level > 0), keySw6);
+            ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+        }
+    }
+
     updateRowStates();
 
+    // 1. Native tweak feature6: in ros.dylib
     dispatch_async(getVIPQueue(), ^{
-        triggerTweakFeature("feature6:", "sw6", newState);
+        triggerTweakFeature("feature6:", "sw6", (level > 0));
     });
 
-    printf("[FlyMenuUI] Speed Epic VIP toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    // 2. Python engine speed multiplier in ros_fly
+    char pyCmd[128];
+    snprintf(pyCmd, sizeof(pyCmd), "set_speed_multiplier(%.1f)", s_speedMultipliers[level]);
+    runFlyPython(pyCmd);
+
+    printf("[FlyMenuUI] Speed Epic VIP level set to %d (%s, %.1fx)\n", level, s_speedNames[level], s_speedMultipliers[level]);
+}
+
+static void toggleSpeedEpic_imp(id self, SEL _cmd, id sender) {
+    int cur = getSpeedEpicLevel();
+    int next = (cur + 1) % s_numSpeedLevels;
+    applySpeedEpicLevel(next);
+}
+
+static void speedEpicUp_imp(id self, SEL _cmd, id sender) {
+    int cur = getSpeedEpicLevel();
+    int next = (cur < s_numSpeedLevels - 1) ? (cur + 1) : 0;
+    applySpeedEpicLevel(next);
+}
+
+static void speedEpicDown_imp(id self, SEL _cmd, id sender) {
+    int cur = getSpeedEpicLevel();
+    int next = (cur > 0) ? (cur - 1) : (s_numSpeedLevels - 1);
+    applySpeedEpicLevel(next);
+}
+
+static void onFlyHudSpeed_imp(id self, SEL _cmd, id sender) {
+    speedEpicUp_imp(self, _cmd, sender);
 }
 
 // No Recoil 100% VIP Toggle (Button 8)
@@ -1439,14 +1497,32 @@ static void updateRowStates(void) {
         setSwitchState(6, oneHitOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
         // Speed Epic VIP (Button 7)
-        BOOL speedOn = NO;
-        if (defsCls && s_keySw6) {
-            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-            if (defs) {
-                speedOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySw6);
-            }
-        }
+        int speedLvl = getSpeedEpicLevel();
+        BOOL speedOn = (speedLvl > 0);
         setSwitchState(7, speedOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Update row 7 label to show current speed
+        if (g_rowLabels[7] && strCls) {
+            char titleBuf[64];
+            if (speedLvl == 0) {
+                snprintf(titleBuf, sizeof(titleBuf), "Speed Epic: OFF");
+            } else {
+                snprintf(titleBuf, sizeof(titleBuf), "Speed Epic: %s", s_speedNames[speedLvl]);
+            }
+            id txt = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), titleBuf);
+            if (txt) ((msgSend_void_id)objc_msgSend)(g_rowLabels[7], sel("setText:"), txt);
+        }
+
+        // Update on-screen floating Fly HUD speed button if present
+        if (g_flyHudSpeedBtn && strCls) {
+            char hudBuf[32];
+            snprintf(hudBuf, sizeof(hudBuf), "SPD: %s", s_speedNames[speedLvl]);
+            id spdTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), hudBuf);
+            if (spdTitle) ((msgSend_id_id_long)objc_msgSend)(g_flyHudSpeedBtn, sel("setTitle:forState:"), spdTitle, 0);
+
+            id spdBg = speedOn ? onPillBg : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.12, 0.16, 0.24, 0.92);
+            if (spdBg) ((msgSend_void_id)objc_msgSend)(g_flyHudSpeedBtn, sel("setBackgroundColor:"), spdBg);
+        }
 
         // No Recoil 100% VIP (Button 8)
         BOOL recoilOn = NO;
@@ -1604,7 +1680,7 @@ static void createFloatingFlyHUD(id win) {
     id hudView = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
     if (!hudView) return;
 
-    ((msgSend_void_rect)objc_msgSend)(hudView, sel("setFrame:"), CGRectMake(20, 165, 172, 38));
+    ((msgSend_void_rect)objc_msgSend)(hudView, sel("setFrame:"), CGRectMake(20, 165, 244, 38));
     ((msgSend_void_long)objc_msgSend)(hudView, sel("setUserInteractionEnabled:"), 1);
 
     id hudBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.05, 0.07, 0.11, 0.88);
@@ -1727,6 +1803,46 @@ static void createFloatingFlyHUD(id win) {
         ((msgSend_void_id_sel_long)objc_msgSend)(downBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudLiftStop:"), (1 << 6) | (1 << 7) | (1 << 8) /* TouchUp/Cancel */);
         ((msgSend_void_id)objc_msgSend)(hudView, sel("addSubview:"), downBtn);
         g_flyHudDownBtn = downBtn;
+    }
+
+    // 4. Speed Button (frame: 172, 4, 68, 30) - allows user to up speed directly on screen
+    id speedBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+    if (speedBtn) {
+        ((msgSend_void_rect)objc_msgSend)(speedBtn, sel("setFrame:"), CGRectMake(172, 4, 68, 30));
+        int curLvl = getSpeedEpicLevel();
+        BOOL isSpdOn = (curLvl > 0);
+        id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
+        id defBg = isSpdOn ? onPillBg : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.12, 0.16, 0.24, 0.92);
+        if (defBg) ((msgSend_void_id)objc_msgSend)(speedBtn, sel("setBackgroundColor:"), defBg);
+
+        id sLayer = ((id (*)(id, SEL))objc_msgSend)(speedBtn, sel("layer"));
+        if (sLayer) {
+            ((msgSend_void_double)objc_msgSend)(sLayer, sel("setCornerRadius:"), 15.0);
+            ((msgSend_void_double)objc_msgSend)(sLayer, sel("setBorderWidth:"), 1.0);
+            id sBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.2, 0.7, 1.0, 0.4);
+            if (sBorder) {
+                id cgSB = ((id (*)(id, SEL))objc_msgSend)(sBorder, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(sLayer, sel("setBorderColor:"), cgSB);
+            }
+            ((msgSend_void_long)objc_msgSend)(sLayer, sel("setMasksToBounds:"), 1);
+        }
+
+        char spdBuf[32];
+        snprintf(spdBuf, sizeof(spdBuf), "SPD: %s", s_speedNames[curLvl]);
+        id sTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), spdBuf);
+        id whiteColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 1.0, 1.0, 1.0);
+        ((msgSend_id_id_long)objc_msgSend)(speedBtn, sel("setTitle:forState:"), sTitle, 0);
+        ((msgSend_id_id_long)objc_msgSend)(speedBtn, sel("setTitleColor:forState:"), whiteColor, 0);
+
+        id sLbl = ((id (*)(id, SEL))objc_msgSend)(speedBtn, sel("titleLabel"));
+        if (sLbl && uiFont) {
+            id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 11.5);
+            if (font) ((msgSend_void_id)objc_msgSend)(sLbl, sel("setFont:"), font);
+        }
+
+        ((msgSend_void_id_sel_long)objc_msgSend)(speedBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudSpeed:"), 1 << 6);
+        ((msgSend_void_id)objc_msgSend)(hudView, sel("addSubview:"), speedBtn);
+        g_flyHudSpeedBtn = speedBtn;
     }
 
     // Pan drag gesture to move the Fly HUD anywhere on screen
@@ -2351,7 +2467,7 @@ static void setupMenuUI(id win, id panel) {
         if (uiLabel && nsString) {
             id lbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
             if (lbl) {
-                ((msgSend_void_rect)objc_msgSend)(lbl, sel("setFrame:"), CGRectMake(54, 0, panelW - 20 - 58, rowH));
+                ((msgSend_void_rect)objc_msgSend)(lbl, sel("setFrame:"), CGRectMake(54, 0, (i == 7) ? (panelW - 20 - 54 - 76) : (panelW - 20 - 58), rowH));
                 ((msgSend_void_long)objc_msgSend)(lbl, sel("setUserInteractionEnabled:"), 0); // Touches pass through to button
                 id txt = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), cleanTitles[i]);
                 if (txt) ((msgSend_void_id)objc_msgSend)(lbl, sel("setText:"), txt);
@@ -2414,6 +2530,76 @@ static void setupMenuUI(id win, id panel) {
             }
             ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
             ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("showCustomInfo:"), 1 << 6);
+        }
+
+        // For button 7 (Speed Epic VIP), wire cleanly and add [-] and [+] stepper controls
+        if (i == 7) {
+            id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
+            if (allTargets) {
+                id enumerator = ((id (*)(id, SEL))objc_msgSend)(allTargets, sel("objectEnumerator"));
+                if (enumerator) {
+                    id t;
+                    while ((t = ((id (*)(id, SEL))objc_msgSend)(enumerator, sel("nextObject")))) {
+                        ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), t, NULL, 0x0FFFFFFF);
+                    }
+                }
+            }
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleSpeedEpic:"), 1 << 6);
+
+            // Step Down [-] Button
+            id minusBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+            if (minusBtn) {
+                ((msgSend_void_rect)objc_msgSend)(minusBtn, sel("setFrame:"), CGRectMake(panelW - 20 - 74, 5, 32, 28));
+                id mBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.16, 0.20, 0.28, 0.95);
+                if (mBg) ((msgSend_void_id)objc_msgSend)(minusBtn, sel("setBackgroundColor:"), mBg);
+                id mLayer = ((id (*)(id, SEL))objc_msgSend)(minusBtn, sel("layer"));
+                if (mLayer) {
+                    ((msgSend_void_double)objc_msgSend)(mLayer, sel("setCornerRadius:"), 6.0);
+                    ((msgSend_void_double)objc_msgSend)(mLayer, sel("setBorderWidth:"), 1.0);
+                    id brd = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.4);
+                    if (brd) ((msgSend_void_id)objc_msgSend)(mLayer, sel("setBorderColor:"), ((id (*)(id, SEL))objc_msgSend)(brd, sel("CGColor")));
+                    ((msgSend_void_long)objc_msgSend)(mLayer, sel("setMasksToBounds:"), 1);
+                }
+                id mTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "−");
+                ((msgSend_id_id_long)objc_msgSend)(minusBtn, sel("setTitle:forState:"), mTitle, 0);
+                id cyanColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.9, 1.0, 1.0);
+                ((msgSend_id_id_long)objc_msgSend)(minusBtn, sel("setTitleColor:forState:"), cyanColor, 0);
+                id mLbl = ((id (*)(id, SEL))objc_msgSend)(minusBtn, sel("titleLabel"));
+                if (mLbl && uiFont) {
+                    id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 15.0);
+                    if (f) ((msgSend_void_id)objc_msgSend)(mLbl, sel("setFont:"), f);
+                }
+                ((msgSend_void_id_sel_long)objc_msgSend)(minusBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("speedEpicDown:"), 1 << 6);
+                ((msgSend_void_id)objc_msgSend)(btn, sel("addSubview:"), minusBtn);
+            }
+
+            // Step Up [+] Button
+            id plusBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+            if (plusBtn) {
+                ((msgSend_void_rect)objc_msgSend)(plusBtn, sel("setFrame:"), CGRectMake(panelW - 20 - 38, 5, 32, 28));
+                id pBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.16, 0.20, 0.28, 0.95);
+                if (pBg) ((msgSend_void_id)objc_msgSend)(plusBtn, sel("setBackgroundColor:"), pBg);
+                id pLayer = ((id (*)(id, SEL))objc_msgSend)(plusBtn, sel("layer"));
+                if (pLayer) {
+                    ((msgSend_void_double)objc_msgSend)(pLayer, sel("setCornerRadius:"), 6.0);
+                    ((msgSend_void_double)objc_msgSend)(pLayer, sel("setBorderWidth:"), 1.0);
+                    id brd = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.4);
+                    if (brd) ((msgSend_void_id)objc_msgSend)(pLayer, sel("setBorderColor:"), ((id (*)(id, SEL))objc_msgSend)(brd, sel("CGColor")));
+                    ((msgSend_void_long)objc_msgSend)(pLayer, sel("setMasksToBounds:"), 1);
+                }
+                id pTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "+");
+                ((msgSend_id_id_long)objc_msgSend)(plusBtn, sel("setTitle:forState:"), pTitle, 0);
+                id cyanColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.9, 1.0, 1.0);
+                ((msgSend_id_id_long)objc_msgSend)(plusBtn, sel("setTitleColor:forState:"), cyanColor, 0);
+                id pLbl = ((id (*)(id, SEL))objc_msgSend)(plusBtn, sel("titleLabel"));
+                if (pLbl && uiFont) {
+                    id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 15.0);
+                    if (f) ((msgSend_void_id)objc_msgSend)(pLbl, sel("setFont:"), f);
+                }
+                ((msgSend_void_id_sel_long)objc_msgSend)(plusBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("speedEpicUp:"), 1 << 6);
+                ((msgSend_void_id)objc_msgSend)(btn, sel("addSubview:"), plusBtn);
+            }
         }
 
         // Bring button to front so touches are natively received
@@ -3363,6 +3549,9 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("selectTab:"), (IMP)selectTab_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleOneHit:"), (IMP)toggleOneHit_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("speedEpicUp:"), (IMP)speedEpicUp_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("speedEpicDown:"), (IMP)speedEpicDown_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("onFlyHudSpeed:"), (IMP)onFlyHudSpeed_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleAimbot:"), (IMP)toggleAimbot_imp, "v@:@");
@@ -3382,6 +3571,10 @@ static void initFlyMenuUI(void) {
     } else {
         uiMgrCls = cls("ROSUIManager");
         if (uiMgrCls) {
+            class_addMethod(uiMgrCls, sel("toggleSpeedEpic:"), (IMP)toggleSpeedEpic_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("speedEpicUp:"), (IMP)speedEpicUp_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("speedEpicDown:"), (IMP)speedEpicDown_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("onFlyHudSpeed:"), (IMP)onFlyHudSpeed_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleAimbot:"), (IMP)toggleAimbot_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
