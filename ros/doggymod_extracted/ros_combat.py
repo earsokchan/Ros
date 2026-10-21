@@ -830,7 +830,7 @@ def _tick():
         selected = None
         if _aim or _aim_smooth:
             try:
-                # Safely probe fire button without aborting if userInput component is not ready
+                # Safely probe fire button across input components and character state
                 _fire_held = False
                 try:
                     input_go = getattr(Globals, 'userInput', None)
@@ -838,15 +838,42 @@ def _tick():
                         get_component = getattr(input_go, 'GetComponent', None)
                         if callable(get_component):
                             input_component = get_component('InputInterpred')
-                            if input_component is not None and hasattr(input_component, '_isFireBtnDwn'):
-                                _fire_held = bool(input_component._isFireBtnDwn)
+                            if input_component is not None:
+                                for f_attr in ('_isFireBtnDwn', 'isFireBtnDwn', '_is_fire_btn_dwn', '_isShooting', 'isShooting', '_isFire', 'isFire'):
+                                    val = getattr(input_component, f_attr, None)
+                                    if val is not None:
+                                        try:
+                                            if callable(val):
+                                                val = val()
+                                            if bool(val):
+                                                _fire_held = True
+                                                break
+                                        except Exception:
+                                            pass
+                    if not _fire_held:
+                        for obj in (player, local_entity):
+                            if obj is None:
+                                continue
+                            for f_attr in ('is_shooting', 'isShooting', 'is_firing', 'isFiring', 'is_fire', 'isFire'):
+                                val = getattr(obj, f_attr, None)
+                                if val is not None:
+                                    try:
+                                        if callable(val):
+                                            val = val()
+                                        if bool(val):
+                                            _fire_held = True
+                                            break
+                                    except Exception:
+                                        pass
+                            if _fire_held:
+                                break
                 except Exception:
                     _fire_held = False
 
-                # Aim Smooth auto-aims only when player is holding a firearm (gun)!
-                # If user has no gun (bare hands / fists / melee / throwables / running unholstered), do not aimsmooth.
+                # 1. Aimbot 360 Lock (Button 3): needs shooting (user shoots / holds fire button to aimlock)
+                # 2. Aim Smooth (Button 10): auto locks aim to enemy when holding a firearm (auto aim without needing to shoot)
                 using_gun = _is_using_gun(player, local_entity)
-                should_aim = _aim or (_aim_smooth and using_gun) or _fire_held
+                should_aim = (_aim and _fire_held) or (_aim_smooth and using_gun)
                 if not should_aim:
                     _target_id = None
                 else:
