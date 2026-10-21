@@ -100,6 +100,18 @@ static id g_aimHudView = NULL;
 static id g_aimHudToggleBtn = NULL;
 static void ensureFloatingAimHUD(id win);
 static void createFloatingAimHUD(id win);
+static inline void safePyDecref(void *obj) {
+    if (!obj) return;
+    int64_t *ref = (int64_t *)obj;
+    if (--(*ref) == 0) {
+        void *tp = *((void **)obj + 1);
+        if (tp) {
+            void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
+            if (dealloc) dealloc(obj);
+        }
+    }
+}
+
 static int checkPlayerHoldingGun(void);
 
 // Helper to get app Documents path using pure Objective-C runtime
@@ -1227,6 +1239,73 @@ static void setSwitchState(int idx, BOOL on, id onPillBg, id offPillBg, id white
     }
 }
 
+static void updateAimSmoothHudState(void) {
+    Class defsCls = cls("NSUserDefaults");
+    Class strCls = cls("NSString");
+    Class uiColor = cls("UIColor");
+    if (!defsCls || !strCls || !uiColor) return;
+
+    static id s_keyAimSmooth = NULL;
+    if (!s_keyAimSmooth) {
+        s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+    }
+
+    BOOL aimSmoothEnabled = YES; // Auto Aim Smooth enabled by default
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (defs && s_keyAimSmooth) {
+        id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), s_keyAimSmooth);
+        if (val) {
+            aimSmoothEnabled = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyAimSmooth);
+        }
+    }
+
+    int gunHolding = checkPlayerHoldingGun();
+    // Automatic Gun Detection:
+    // When avatar is holding a gun (1): AIM: ON (active aimlock, neon coral glow)
+    // When avatar is NOT holding a gun (0) (bare hands / fists / head): AIM: OFF (free camera scrolling)
+    BOOL isAimActive = NO;
+    if (aimSmoothEnabled) {
+        if (gunHolding == 1) {
+            isAimActive = YES;
+        } else if (gunHolding == 0) {
+            isAimActive = NO;
+        } else {
+            // Still loading / lobby: default to inactive until gun confirmed
+            isAimActive = NO;
+        }
+    } else {
+        isAimActive = NO;
+    }
+
+    id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
+    id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+    id whiteColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 1.0, 1.0, 1.0);
+    id knobOffColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.50, 0.55, 0.65, 1.0);
+    id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.35, 0.45, 0.85);
+    id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+
+    setSwitchState(10, isAimActive, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+    // Update on-screen floating Aim Smooth HUD button state
+    if (g_aimHudToggleBtn) {
+        const char *aimText = isAimActive ? "AIM: ON" : "AIM: OFF";
+        id aimTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
+        ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), aimTitle, 0);
+
+        id btnBg = isAimActive ? onPillBg : offPillBg;
+        if (btnBg) ((msgSend_void_id)objc_msgSend)(g_aimHudToggleBtn, sel("setBackgroundColor:"), btnBg);
+
+        id tLayer = ((id (*)(id, SEL))objc_msgSend)(g_aimHudToggleBtn, sel("layer"));
+        if (tLayer) {
+            id brdColor = isAimActive ? activeBorder : normalBorder;
+            if (brdColor) {
+                id cgBrd = ((id (*)(id, SEL))objc_msgSend)(brdColor, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgBrd);
+            }
+        }
+    }
+}
+
 // Update pill colors, knob positions & button card borders based on real core engine state
 static void updateRowStates(void) {
     @autoreleasepool {
@@ -1389,54 +1468,9 @@ static void updateRowStates(void) {
         }
         setSwitchState(9, wallhackOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
-        // Aim Smooth 100% Auto (Button 10)
-        static id s_keyAimSmooth = NULL;
-        if (strCls && !s_keyAimSmooth) {
-            s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-        }
-        BOOL aimSmoothOn = NO;
-        if (defsCls && s_keyAimSmooth) {
-            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-            if (defs) {
-                aimSmoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyAimSmooth);
-            }
-        }
-        setSwitchState(10, aimSmoothOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
-
-        // Update on-screen floating Aim Smooth HUD button state
-        if (g_aimHudToggleBtn) {
-            Class nsString = cls("NSString");
-            Class uiColor = cls("UIColor");
-            if (nsString && uiColor) {
-                int gunHolding = checkPlayerHoldingGun();
-                // When holding a gun, auto activate; when unarmed/hands, auto deactivate
-                BOOL aimActive = aimSmoothOn && (gunHolding != 0);
-                const char *aimText = "AIM: OFF";
-                if (aimSmoothOn) {
-                    if (gunHolding == 1) {
-                        aimText = "AIM: ON";
-                    } else if (gunHolding == 0) {
-                        aimText = "AIM: OFF";
-                    } else {
-                        aimText = "AIM: ON";
-                    }
-                }
-                id aimTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), aimText);
-                ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), aimTitle, 0);
-
-                id btnBg = aimActive ? onPillBg : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
-                if (btnBg) ((msgSend_void_id)objc_msgSend)(g_aimHudToggleBtn, sel("setBackgroundColor:"), btnBg);
-
-                id tLayer = ((id (*)(id, SEL))objc_msgSend)(g_aimHudToggleBtn, sel("layer"));
-                if (tLayer) {
-                    id brdColor = aimActive ? activeBorder : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
-                    if (brdColor) {
-                        id cgBrd = ((id (*)(id, SEL))objc_msgSend)(brdColor, sel("CGColor"));
-                        ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgBrd);
-                    }
-                }
-            }
-        }
+        // Aim Smooth 100% Auto (Button 10 & Floating Aim HUD)
+        // Aim Smooth 100% Auto (Button 10) & On-Screen Floating Aim Smooth HUD
+        updateAimSmoothHudState();
 
         // Fly HUD Outside Screen (Button 11)
         static id s_keyFlyHud = NULL;
@@ -1754,10 +1788,17 @@ static int checkPlayerHoldingGun(void) {
     }
     if (!coreSlide) return -1;
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
+    if (!pCombatReady || *pCombatReady != 1) {
+        int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
+        if (ensureCombat) {
+            ensureCombat();
+        }
+    }
     if (!pCombatReady || *pCombatReady != 1) return -1;
     void **pCombatDict = (void **)(coreSlide + 0xc168);
     if (!pCombatDict || !(*pCombatDict)) return -1;
     void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
+    void **pPyErrClear = (void **)(coreSlide + 0xc110);
     void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
     void **pPyRunString = (void **)(coreSlide + 0xc138);
     void **pPyStringAsString = (void **)(coreSlide + 0xc150);
@@ -1767,18 +1808,27 @@ static int checkPlayerHoldingGun(void) {
     void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
     void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
     char *(*PyString_AsString)(void *) = pPyStringAsString ? (char *(*)(void *))*pPyStringAsString : NULL;
+    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
 
     int gstate = PyGILState_Ensure();
-    int hasGun = 0;
+    int hasGun = -1;
     void *dict = *pCombatDict;
     if (dict) {
-        void *res = PyRun_String("str(is_holding_gun())", 258 /* Py_eval_input */, dict, dict);
-        if (res && PyString_AsString) {
-            char *s = PyString_AsString(res);
-            if (s && s[0] == '1') {
-                hasGun = 1;
+        void *res = PyRun_String("str(1 if is_holding_gun() else 0)", 258 /* Py_eval_input */, dict, dict);
+        if (res) {
+            if (PyString_AsString) {
+                char *s = PyString_AsString(res);
+                if (s) {
+                    if (s[0] == '1' || s[0] == 'T' || s[0] == 't') {
+                        hasGun = 1;
+                    } else if (s[0] == '0' || s[0] == 'F' || s[0] == 'f') {
+                        hasGun = 0;
+                    }
+                }
             }
+            safePyDecref(res);
         }
+        if (PyErr_Clear) PyErr_Clear();
     }
     PyGILState_Release(gstate);
     return hasGun;
@@ -1897,12 +1947,17 @@ static void setupMenuUI(id win, id panel) {
         if (defs) {
             Class strCls = cls("NSString");
             if (strCls) {
-                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw_esp", "sw_aimsmooth", NULL};
+                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw_esp", NULL};
                 for (int k = 0; resetKeys[k]; k++) {
                     id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), resetKeys[k]);
                     if (key) {
                         ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), NO, key);
                     }
+                }
+                // Initialize sw_aimsmooth to YES by default so floating Aim HUD is auto-active
+                id keyAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+                if (keyAim) {
+                    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), YES, keyAim);
                 }
                 ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
             }
@@ -2371,17 +2426,7 @@ static void setupMenuUI(id win, id panel) {
     ensureFloatingAimHUD(win);
 }
 
-static inline void safePyDecref(void *obj) {
-    if (!obj) return;
-    int64_t *ref = (int64_t *)obj;
-    if (--(*ref) == 0) {
-        void *tp = *((void **)obj + 1);
-        if (tp) {
-            void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
-            if (dealloc) dealloc(obj);
-        }
-    }
-}
+
 
 static BOOL runCombatPython(const char *cmd) {
     if (!cmd) return NO;
@@ -2399,6 +2444,12 @@ static BOOL runCombatPython(const char *cmd) {
     if (!foundCore) return NO;
 
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
+    if (!pCombatReady || *pCombatReady != 1) {
+        int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
+        if (ensureCombat) {
+            ensureCombat();
+        }
+    }
     if (!pCombatReady || *pCombatReady != 1) return NO;
 
     void **pCombatDict = (void **)(coreSlide + 0xc168);
@@ -3128,6 +3179,11 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
     ensureFloatingButtonOnWindow(win);
     ensureFloatingFlyHUD(win);
     ensureFloatingAimHUD(win);
+
+    // Synchronize Floating Aim Smooth HUD with live avatar weapon state in real time
+    if (tickCount % 2 == 0) {
+        updateAimSmoothHudState();
+    }
 
     // 2. Discover and hook FlyMenu_core panel across windows safely
     if (!g_panel) {

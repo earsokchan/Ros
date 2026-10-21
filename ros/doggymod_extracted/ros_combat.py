@@ -21,7 +21,9 @@ if _fly is None:
         import ros_fly as _fly
     except Exception:
         pass
-Globals = getattr(_fly, 'Globals', None) if _fly else None
+Globals = sys.modules.get('Globals')
+if Globals is None and _fly:
+    Globals = getattr(_fly, 'Globals', None)
 Timer = getattr(_fly, 'Timer', None) if _fly else None
 _movement = getattr(_fly, '_movement', None) if _fly else None
 _esp = False
@@ -207,15 +209,31 @@ def _is_using_gun(player, local_entity):
     """
     global _weapon_debug
     try:
-        if local_entity is None and player is None:
+        Globals_mod = sys.modules.get('Globals')
+        if Globals_mod is None and 'Globals' in globals():
+            Globals_mod = Globals
+        avatar = getattr(Globals_mod, 'avatar', None) if Globals_mod else None
+
+        if player is None and Globals_mod is not None:
+            player = getattr(Globals_mod, 'player', None) or getattr(Globals_mod, 'local_player', None)
+        if local_entity is None and player is not None:
+            local_entity = getattr(player, 'entity', None)
+        if local_entity is None and avatar is not None:
+            local_entity = getattr(avatar, 'entity', None) or avatar
+
+        if local_entity is None and player is None and avatar is None:
             _weapon_debug = 'no_objs->False'
             return False
 
-        Globals_mod = sys.modules.get('Globals')
-        avatar = getattr(Globals_mod, 'avatar', None) if Globals_mod else None
-
-        # Primary character objects ONLY (never inspect backpack/inventory containers)
-        char_objs = [('entity', local_entity), ('player', player), ('avatar', avatar)]
+        # Primary character objects and their weapon/equip components
+        char_objs = []
+        for l, o in [('entity', local_entity), ('player', player), ('avatar', avatar)]:
+            if o is not None and o not in [x[1] for x in char_objs]:
+                char_objs.append((l, o))
+                for comp_name in ('weapon_comp', 'weapon_component', 'weaponComponent', 'equip_comp', 'equip_component'):
+                    comp = getattr(o, comp_name, None)
+                    if comp is not None and comp not in [x[1] for x in char_objs]:
+                        char_objs.append(('%s.%s' % (l, comp_name), comp))
 
         # ===== CHECK 1: Check Explicit Unarmed / Fist / Bare Hand Indicators =====
         unarmed_attrs = (
@@ -276,6 +294,32 @@ def _is_using_gun(player, local_entity):
                     except Exception:
                         pass
 
+        # ===== CHECK 2b: Weapon ID on Character (0 = Bare hands, >0 = Gun) =====
+        for label, obj in char_objs:
+            if obj is None:
+                continue
+            for id_name in ('cur_weapon_id', 'curWeaponId', 'weapon_id', 'weaponId', 'hold_weapon_id', 'holdWeaponId'):
+                if hasattr(obj, id_name):
+                    try:
+                        wid = getattr(obj, id_name)
+                        if callable(wid):
+                            wid = wid()
+                        wid_int = int(wid or 0)
+                        if wid_int <= 0:
+                            _weapon_debug = '%s.%s=%d->False(Bare Hands)' % (label, id_name, wid_int)
+                            _log_weapon_debug(_weapon_debug)
+                            return False
+                        if (400 <= wid_int <= 599) or (4000 <= wid_int <= 5999):
+                            _weapon_debug = '%s.%s=%d->False(Melee/Grenade)' % (label, id_name, wid_int)
+                            _log_weapon_debug(_weapon_debug)
+                            return False
+                        if wid_int > 0:
+                            _weapon_debug = '%s.%s=%d->True(Gun ID)' % (label, id_name, wid_int)
+                            _log_weapon_debug(_weapon_debug)
+                            return True
+                    except Exception:
+                        pass
+
         # ===== CHECK 3: Active Weapon Instance on Player / Entity / Globals =====
         # Only check active hand weapon (cur_weapon, hold_weapon)
         w_sources = []
@@ -298,7 +342,55 @@ def _is_using_gun(player, local_entity):
                             _log_weapon_debug(_weapon_debug)
                             return False
 
-                        if w is not None and not isinstance(w, (int, float, bool, str)):
+                        if isinstance(w, (int, long)):
+                            wid = int(w)
+                            if wid <= 0:
+                                _weapon_debug = '%s.%s=%d->False(Bare Hands)' % (label, w_name, wid)
+                                _log_weapon_debug(_weapon_debug)
+                                return False
+                            if (400 <= wid <= 599) or (4000 <= wid <= 5999):
+                                _weapon_debug = '%s.%s=%d->False(Melee/Grenade)' % (label, w_name, wid)
+                                _log_weapon_debug(_weapon_debug)
+                                return False
+                            if wid > 0:
+                                _weapon_debug = '%s.%s=%d->True(Gun ID)' % (label, w_name, wid)
+                                _log_weapon_debug(_weapon_debug)
+                                return True
+
+                        if isinstance(w, (str, unicode)):
+                            w_str = str(w).lower()
+                            if any(k in w_str for k in ('fist', 'bare', 'unarm', 'hand', 'empty', 'none', 'null', 'melee', 'pan', 'crowbar', 'chicken', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
+                                _weapon_debug = '%s.%s=%s->False(Bare/Melee)' % (label, w_name, w_str)
+                                _log_weapon_debug(_weapon_debug)
+                                return False
+                            _weapon_debug = '%s.%s=%s->True(Gun Name)' % (label, w_name, w_str)
+                            _log_weapon_debug(_weapon_debug)
+                            return True
+
+                        if w is not None:
+                            # Check weapon ID attribute on weapon object
+                            for id_attr in ('id', 'weapon_id', 'weaponId', 'item_id', 'itemId'):
+                                if hasattr(w, id_attr):
+                                    try:
+                                        wid_val = getattr(w, id_attr)
+                                        if callable(wid_val):
+                                            wid_val = wid_val()
+                                        wid_i = int(wid_val or 0)
+                                        if wid_i <= 0:
+                                            _weapon_debug = '%s.%s.%s=%d->False(Bare Hands)' % (label, w_name, id_attr, wid_i)
+                                            _log_weapon_debug(_weapon_debug)
+                                            return False
+                                        if (400 <= wid_i <= 599) or (4000 <= wid_i <= 5999):
+                                            _weapon_debug = '%s.%s.%s=%d->False(Melee/Grenade)' % (label, w_name, id_attr, wid_i)
+                                            _log_weapon_debug(_weapon_debug)
+                                            return False
+                                        if wid_i > 0:
+                                            _weapon_debug = '%s.%s.%s=%d->True(Gun ID)' % (label, w_name, id_attr, wid_i)
+                                            _log_weapon_debug(_weapon_debug)
+                                            return True
+                                    except Exception:
+                                        pass
+
                             # Check weapon name
                             w_str = ''
                             for n_attr in ('name', 'weapon_name', 'weaponName', 'desc', 'type_name'):
@@ -405,8 +497,21 @@ def is_holding_gun():
     Returns 1 if holding a firearm, 0 if using bare hands / melee / throwables.
     """
     try:
-        player = getattr(Globals, 'player', None) if 'Globals' in globals() and Globals else None
-        entity = getattr(player, 'entity', None) if player is not None else None
+        g = sys.modules.get('Globals')
+        if g is None and 'Globals' in globals():
+            g = Globals
+        player = None
+        if g is not None:
+            for p_attr in ('player', 'avatar', 'local_player', 'cur_player'):
+                p = getattr(g, p_attr, None)
+                if p is not None:
+                    player = p
+                    break
+        entity = None
+        if player is not None:
+            entity = getattr(player, 'entity', None)
+        if entity is None and g is not None:
+            entity = getattr(g, 'avatar', None) or getattr(g, 'entity', None)
         return 1 if _is_using_gun(player, entity) else 0
     except Exception:
         return 0
