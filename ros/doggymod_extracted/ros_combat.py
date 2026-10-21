@@ -222,16 +222,6 @@ def _is_vehicle(go, entity=None):
             if any(k in low_g for k in ('vehicle', 'car', 'bike', 'motor', 'bicycle', 'jeep',
                                         'truck', 'boat', 'van', 'glider', 'plane', 'aircraft',
                                         'sports_car', 'drivable', 'quad', 'scooter', 'pickup')):
-                return True
-            # Check GameObject components
-            if hasattr(go, 'GetComponent'):
-                try:
-                    for comp in ('Vehicle', 'VehicleEntity', 'CarController', 'BikeController',
-                                 'MotorController', 'VehicleController', 'DrivableVehicle'):
-                        if go.GetComponent(comp) is not None:
-                            return True
-                except Exception:
-                    pass
         return False
     except Exception:
         return False
@@ -392,15 +382,6 @@ def _is_using_gun(player, local_entity):
             except Exception:
                 pass
 
-        # Player GameObject components
-        if player is not None and hasattr(player, 'GetComponent'):
-            for c_name in ('ShootAssist', 'CombatUnit', 'WeaponComponent', 'WeaponMachine', 'Equip'):
-                try:
-                    comp = player.GetComponent(c_name)
-                    if comp is not None and comp not in [x[1] for x in char_objs]:
-                        char_objs.append(('Component.' + c_name, comp))
-                except Exception:
-                    pass
 
         # ===== CHECK 1: Check Explicit Unarmed / Fist / Bare Hand Indicators =====
         unarmed_attrs = (
@@ -592,30 +573,15 @@ def _is_using_gun(player, local_entity):
         return True
 
 
+_is_gun_held = 0
+
 def is_holding_gun():
     """
     Exposed helper to check if avatar is currently holding a gun.
-    Returns 1 if holding a firearm, 0 if using bare hands / melee / throwables.
+    Returns cached _is_gun_held safely without touching native C++ objects from UIKit thread.
     """
-    try:
-        g = sys.modules.get('Globals')
-        if g is None and 'Globals' in globals():
-            g = Globals
-        player = None
-        if g is not None:
-            for p_attr in ('player', 'avatar', 'local_player', 'cur_player'):
-                p = getattr(g, p_attr, None)
-                if p is not None:
-                    player = p
-                    break
-        entity = None
-        if player is not None:
-            entity = getattr(player, 'entity', None)
-        if entity is None and g is not None:
-            entity = getattr(g, 'avatar', None) or getattr(g, 'entity', None)
-        return 1 if _is_using_gun(player, entity) else 0
-    except Exception:
-        return 1
+    global _is_gun_held
+    return _is_gun_held
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
@@ -667,13 +633,17 @@ def _clear_frame():
     _write_esp_file('')
 
 
+_scene_fingerprint = None
+_scene_change_time = 0.0
+
+
 def _ensure_timer():
     global _timer, _last_tick, Timer
     if Timer is None:
         Timer = _resolve_game_timer()
     if _timer is None and Timer is not None:
         try:
-            _timer = Timer.addRepeatTimer(0.010, _tick)
+            _timer = Timer.addRepeatTimer(0.03333, _tick)
             _last_tick = time.time()
         except Exception:
             pass
@@ -774,6 +744,7 @@ def _tick():
     global _last_tick, _owner, _target_id, _frame, _rich_esp_frame, _frame_time
     global _esp_state, _aim_state, _last_error, _last_skip, _waiting, _ticks, _scanned, _skipped
     global _fire_held, _aim_writes, _last_angles, _esp, _aim, _aim_smooth, _last_esp_str
+    global _scene_fingerprint, _scene_change_time, _is_gun_held
     now = time.time()
     previous_tick = _last_tick
     _last_tick = now
@@ -782,6 +753,7 @@ def _tick():
         if not (_esp or _aim or _aim_smooth):
             _clear_frame()
             _stop_timer()
+            _is_gun_held = 0
             return
         _clear_previous_target = _target_id
         _esp_state = 1 if _esp else 0
@@ -801,6 +773,9 @@ def _tick():
                 pass
         if player is None:
             _waiting = 'Waiting for local player'
+            _clear_frame()
+            _target_id = None
+            _is_gun_held = 0
             return
         local_entity = getattr(player, 'entity', None)
         if local_entity is None:
@@ -808,14 +783,68 @@ def _tick():
                 local_entity = player
             else:
                 _waiting = 'Waiting for player.entity'
+                _clear_frame()
+                _target_id = None
+                _is_gun_held = 0
                 return
         if getattr(local_entity, 'deadInGame', False):
             _esp_state = 3 if _esp else 0
             _aim_state = 3 if _aim else 0
             _waiting = 'Local character dead'
+            _clear_frame()
+            _target_id = None
+            _is_gun_held = 0
             return
         if entity_id is None:
             entity_id = getattr(local_entity, 'id', None)
+        if entity_id is None:
+            _waiting = 'Waiting for entity.id'
+            _clear_frame()
+            _target_id = None
+            _is_gun_held = 0
+            return
+
+        # 1. SCENE TRANSITION & MATCH LOADING SETTLING PERIOD (3.5s quiet period)
+        fingerprint = (id(player), entity_id)
+        if fingerprint != _scene_fingerprint:
+            _scene_fingerprint = fingerprint
+            _scene_change_time = now
+            _waiting = 'Scene/match loading... settling'
+            _clear_frame()
+            _target_id = None
+            _is_gun_held = 0
+            return
+
+        elapsed = now - _scene_change_time
+        if elapsed < 3.5:
+            _waiting = 'Character loading on map... (%.1fs)' % max(0.1, 3.5 - elapsed)
+            _clear_frame()
+            _target_id = None
+            _is_gun_held = 0
+            return
+
+        # 2. VERIFY GROUND CHARACTER IS SPAWNED AND ACTIVE (not in plane/parachute)
+        if unit is not None and character is not None:
+            if (not getattr(unit, 'chInScene', False) or
+                    getattr(unit, 'inVehicle', False) or
+                    getattr(unit, '_useParachute', False) or
+                    getattr(unit, '_observer', False)):
+                _waiting = 'Waiting for ground character (not in plane/parachute)'
+                _clear_frame()
+                _target_id = None
+                return
+
+        if character is not None:
+            try:
+                cpos = getattr(character, 'position', None)
+                if cpos is not None and (abs(float(cpos.x)) < 0.001 and abs(float(cpos.y)) < 0.001 and abs(float(cpos.z)) < 0.001):
+                    _waiting = 'Waiting for character 3D position'
+                    _clear_frame()
+                    _target_id = None
+                    return
+            except Exception:
+                pass
+
         owner = (id(player), entity_id)
         if owner != _owner:
             _clear_previous_target = None
@@ -831,8 +860,13 @@ def _tick():
                 pass
         if camera is None:
             raise Waiting('Waiting for main camera')
-        camera_position = camera.transform.position
-        origin, forward = _xyz(camera_position), _xyz(camera.transform.forward)
+        cam_tf = getattr(camera, 'transform', None)
+        if cam_tf is None:
+            raise Waiting('Waiting for camera transform')
+        camera_position = cam_tf.position
+        if abs(float(camera_position.x)) < 0.001 and abs(float(camera_position.y)) < 0.001 and abs(float(camera_position.z)) < 0.001:
+            raise Waiting('Waiting for active camera spawn')
+        origin, forward = _xyz(camera_position), _xyz(cam_tf.forward)
         pw = getattr(camera, 'pixelWidth', None)
         ph = getattr(camera, 'pixelHeight', None)
         if pw and ph and float(pw) > 10.0 and float(ph) > 10.0:
@@ -1009,6 +1043,7 @@ def _tick():
                 # 1. Aimbot 360 Lock (Button 3): needs shooting (user shoots / holds fire button to aimlock)
                 # 2. Aim Smooth (Button 10): auto locks aim to enemy when holding a firearm (auto aim without needing to shoot)
                 using_gun = _is_using_gun(player, local_entity)
+                _is_gun_held = 1 if using_gun else 0
                 should_aim = (_aim and _fire_held) or (_aim_smooth and using_gun)
                 if not should_aim:
                     _target_id = None
@@ -1066,7 +1101,10 @@ def _tick():
                                 if abs(pitch) <= 1.4:
                                     smooth_pitch = pitch
                                 _last_angles = (smooth_yaw, smooth_pitch)
-                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                                try:
+                                    control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                                except Exception:
+                                    pass
                             elif _aim_smooth and using_gun and _fire_held:
                                 # High-speed responsive lock when shooting
                                 factor = 0.85
@@ -1079,11 +1117,17 @@ def _tick():
                                 if abs(pitch) <= 1.8:
                                     smooth_pitch = pitch
                                 _last_angles = (smooth_yaw, smooth_pitch)
-                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                                try:
+                                    control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                                except Exception:
+                                    pass
                             else:
                                 # Instant lock when Aimbot 360 Lock is used alone
                                 _last_angles = (yaw, pitch)
-                                control.onRotateCamera(Vector2(yaw, pitch), True)
+                                try:
+                                    control.onRotateCamera(Vector2(yaw, pitch), True)
+                                except Exception:
+                                    pass
                             _aim_writes += 1
                             _aim_state = 5
                             _target_id = selected[1]

@@ -335,25 +335,9 @@ def _before_character_removed(unit):
 
 
 def _install_lifecycle_hooks():
-    # Only hook OnDestroy when the character unit is actually destroyed
-    if getattr(MoveUnit, '_ros_fly_lifecycle_installed', False):
-        return
-    original_destroy = getattr(MoveUnit, 'OnDestroy', None)
-    if not callable(original_destroy):
-        return
-
-    def destroy(unit, *args, **kwargs):
-        try:
-            _before_character_removed(unit)
-        except Exception:
-            pass
-        try:
-            return original_destroy(unit, *args, **kwargs)
-        except Exception:
-            pass
-
-    MoveUnit.OnDestroy = destroy
-    MoveUnit._ros_fly_lifecycle_installed = True
+    # Do NOT monkey-patch native C++ MoveUnit.OnDestroy: intercepting engine object destruction
+    # during scene/character load causes hard C++ EXC_BAD_ACCESS in the engine destructor.
+    pass
 
 
 def status():

@@ -1255,7 +1255,7 @@ static void updateAimSmoothHudState(void) {
         s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
     }
 
-    BOOL aimSmoothEnabled = YES; // Auto Aim Smooth enabled by default
+    BOOL aimSmoothEnabled = NO; // Safe default: off on launch until user enables
     id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
     if (defs && s_keyAimSmooth) {
         id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), s_keyAimSmooth);
@@ -1264,7 +1264,10 @@ static void updateAimSmoothHudState(void) {
         }
     }
 
-    int gunHolding = checkPlayerHoldingGun();
+    int gunHolding = 0;
+    if (aimSmoothEnabled) {
+        gunHolding = checkPlayerHoldingGun();
+    }
 
     // Menu Row 10 switch reflects the user's persisted setting (ON or OFF)
     id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
@@ -1930,17 +1933,12 @@ static void setupMenuUI(id win, id panel) {
         if (defs) {
             Class strCls = cls("NSString");
             if (strCls) {
-                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw_esp", NULL};
+                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw_esp", "sw_aimsmooth", "sw_aimbot", NULL};
                 for (int k = 0; resetKeys[k]; k++) {
                     id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), resetKeys[k]);
                     if (key) {
                         ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), NO, key);
                     }
-                }
-                // Initialize sw_aimsmooth to YES by default so floating Aim HUD is auto-active
-                id keyAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-                if (keyAim) {
-                    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), YES, keyAim);
                 }
                 ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
             }
@@ -2876,37 +2874,6 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
             updateRowStates();
         }
 
-        // Periodically ensure Python combat module is synced with Aim Smooth & Aimbot settings
-        if (tickCount % 20 == 0) {
-            Class defsCls = cls("NSUserDefaults");
-            if (defsCls) {
-                id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-                Class strCls = cls("NSString");
-                if (defs && strCls) {
-                    id k = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-                    if (k) {
-                        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), k);
-                        char pyCmd[128];
-                        snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", cur ? "True" : "False");
-                        runCombatPython(pyCmd);
-                    }
-                    id kAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
-                    if (kAim) {
-                        BOOL curAim = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
-                        char pyCmd[128];
-                        snprintf(pyCmd, sizeof(pyCmd), "set_aim(%s)", curAim ? "True" : "False");
-                        runCombatPython(pyCmd);
-                    }
-                    id kEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
-                    if (kEsp) {
-                        BOOL curEsp = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kEsp);
-                        char pyCmd[128];
-                        snprintf(pyCmd, sizeof(pyCmd), "set_esp(%s)", curEsp ? "True" : "False");
-                        runCombatPython(pyCmd);
-                    }
-                }
-            }
-        }
 
         // Keep floating logo, open menu, and ESP overlay properly ordered on top
         if (tickCount % 20 == 0) {
