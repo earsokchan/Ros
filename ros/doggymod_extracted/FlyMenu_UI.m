@@ -88,6 +88,13 @@ static id g_espGreenBoxLayer = NULL;
 static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
 static id g_infoModal = NULL;
 
+// On-screen Floating Fly HUD Globals
+static id g_flyHudView = NULL;
+static id g_flyHudToggleBtn = NULL;
+static id g_flyHudUpBtn = NULL;
+static id g_flyHudDownBtn = NULL;
+static void ensureFloatingFlyHUD(id win);
+
 // Helper to get app Documents path using pure Objective-C runtime
 static id getDocumentsPath(const char *filename) {
     Class fmCls = cls("NSFileManager");
@@ -618,6 +625,10 @@ static void ensureESPOverlayOnTop(void) {
             ((msgSend_void_id)objc_msgSend)(curWin, sel("addSubview:"), g_espOverlay);
         }
         ((msgSend_void_id)objc_msgSend)(curWin, sel("bringSubviewToFront:"), g_espOverlay);
+        if (g_flyHudView) {
+            id hudSuper = ((id (*)(id, SEL))objc_msgSend)(g_flyHudView, sel("superview"));
+            if (hudSuper) ((msgSend_void_id)objc_msgSend)(hudSuper, sel("bringSubviewToFront:"), g_flyHudView);
+        }
         if (g_panel) {
             id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
             if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
@@ -1242,6 +1253,27 @@ static void updateRowStates(void) {
         }
         setSwitchState(0, flyOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
+        // Update on-screen floating Fly HUD button state
+        if (g_flyHudToggleBtn) {
+            Class nsString = cls("NSString");
+            Class uiColor = cls("UIColor");
+            if (nsString && uiColor) {
+                id flyTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), flyOn ? "FLY: ON" : "FLY: OFF");
+                ((msgSend_id_id_long)objc_msgSend)(g_flyHudToggleBtn, sel("setTitle:forState:"), flyTitle, 0);
+                id btnBg = flyOn ? onPillBg : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+                if (btnBg) ((msgSend_void_id)objc_msgSend)(g_flyHudToggleBtn, sel("setBackgroundColor:"), btnBg);
+
+                id tLayer = ((id (*)(id, SEL))objc_msgSend)(g_flyHudToggleBtn, sel("layer"));
+                if (tLayer) {
+                    id brdColor = flyOn ? activeBorder : ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+                    if (brdColor) {
+                        id cgBrd = ((id (*)(id, SEL))objc_msgSend)(brdColor, sel("CGColor"));
+                        ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgBrd);
+                    }
+                }
+            }
+        }
+
         // Aim State (Button 3)
         BOOL aimOn = NO;
         if (g_coreBtns[3]) {
@@ -1252,11 +1284,25 @@ static void updateRowStates(void) {
         setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
         // ESP State (Button 4)
+        static id s_keySwEsp = NULL;
+        Class strCls = cls("NSString");
+        Class defsCls = cls("NSUserDefaults");
+        if (strCls && !s_keySwEsp) {
+            s_keySwEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+        }
         BOOL espOn = NO;
-        if (g_coreBtns[4]) {
+        if (defsCls && s_keySwEsp) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                espOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySwEsp);
+            }
+        }
+        if (!espOn && g_coreBtns[4]) {
             id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
             const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            espOn = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
+            if (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3)) {
+                espOn = YES;
+            }
         }
         setSwitchState(4, espOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
@@ -1269,7 +1315,6 @@ static void updateRowStates(void) {
         static id s_keySw6 = NULL;
         static id s_keySw2 = NULL;
         static id s_keySw1 = NULL;
-        Class strCls = cls("NSString");
         if (strCls) {
             if (!s_keySw7) s_keySw7 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw7");
             if (!s_keySw6) s_keySw6 = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw6");
@@ -1279,7 +1324,6 @@ static void updateRowStates(void) {
 
         // 1 Hit Kill VIP (Button 6)
         BOOL oneHitOn = NO;
-        Class defsCls = cls("NSUserDefaults");
         if (defsCls && s_keySw7) {
             id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
             if (defs) {
@@ -1428,6 +1472,174 @@ static void ensureFloatingButtonOnWindow(id win) {
     }
 }
 
+static void createFloatingFlyHUD(id win) {
+    if (g_flyHudView || !win) return;
+
+    Class uiView = cls("UIView");
+    Class uiBtn = cls("UIButton");
+    Class uiColor = cls("UIColor");
+    Class uiFont = cls("UIFont");
+    Class nsString = cls("NSString");
+    Class panCls = cls("UIPanGestureRecognizer");
+    if (!uiView || !uiBtn || !uiColor || !nsString) return;
+
+    // Outer container view: 172 x 38 pill
+    id hudView = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiView, sel("alloc")), sel("init"));
+    if (!hudView) return;
+
+    ((msgSend_void_rect)objc_msgSend)(hudView, sel("setFrame:"), CGRectMake(20, 165, 172, 38));
+    ((msgSend_void_long)objc_msgSend)(hudView, sel("setUserInteractionEnabled:"), 1);
+
+    id hudBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.05, 0.07, 0.11, 0.88);
+    if (hudBg) ((msgSend_void_id)objc_msgSend)(hudView, sel("setBackgroundColor:"), hudBg);
+
+    id hudLayer = ((id (*)(id, SEL))objc_msgSend)(hudView, sel("layer"));
+    if (hudLayer) {
+        ((msgSend_void_double)objc_msgSend)(hudLayer, sel("setCornerRadius:"), 19.0);
+        ((msgSend_void_double)objc_msgSend)(hudLayer, sel("setBorderWidth:"), 1.5);
+        id bColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.20, 0.70, 0.90, 0.45);
+        if (bColor) {
+            id cgB = ((id (*)(id, SEL))objc_msgSend)(bColor, sel("CGColor"));
+            ((msgSend_void_id)objc_msgSend)(hudLayer, sel("setBorderColor:"), cgB);
+        }
+        ((msgSend_void_long)objc_msgSend)(hudLayer, sel("setMasksToBounds:"), 1);
+    }
+
+    // 1. Fly Toggle Button (frame: 4, 4, 96, 30)
+    id toggleBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+    if (toggleBtn) {
+        ((msgSend_void_rect)objc_msgSend)(toggleBtn, sel("setFrame:"), CGRectMake(4, 4, 96, 30));
+        id defBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+        if (defBg) ((msgSend_void_id)objc_msgSend)(toggleBtn, sel("setBackgroundColor:"), defBg);
+
+        id tLayer = ((id (*)(id, SEL))objc_msgSend)(toggleBtn, sel("layer"));
+        if (tLayer) {
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setCornerRadius:"), 15.0);
+            ((msgSend_void_double)objc_msgSend)(tLayer, sel("setBorderWidth:"), 1.0);
+            id tBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
+            if (tBorder) {
+                id cgTB = ((id (*)(id, SEL))objc_msgSend)(tBorder, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(tLayer, sel("setBorderColor:"), cgTB);
+            }
+            ((msgSend_void_long)objc_msgSend)(tLayer, sel("setMasksToBounds:"), 1);
+        }
+
+        id tTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "FLY: OFF");
+        id whiteColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 1.0, 1.0, 1.0);
+        ((msgSend_id_id_long)objc_msgSend)(toggleBtn, sel("setTitle:forState:"), tTitle, 0);
+        ((msgSend_id_id_long)objc_msgSend)(toggleBtn, sel("setTitleColor:forState:"), whiteColor, 0);
+
+        id lbl = ((id (*)(id, SEL))objc_msgSend)(toggleBtn, sel("titleLabel"));
+        if (lbl && uiFont) {
+            id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 11.5);
+            if (font) ((msgSend_void_id)objc_msgSend)(lbl, sel("setFont:"), font);
+        }
+
+        ((msgSend_void_id_sel_long)objc_msgSend)(toggleBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudToggle:"), 1 << 6);
+        ((msgSend_void_id)objc_msgSend)(hudView, sel("addSubview:"), toggleBtn);
+        g_flyHudToggleBtn = toggleBtn;
+    }
+
+    // 2. Up Button (frame: 104, 4, 30, 30)
+    id upBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+    if (upBtn) {
+        ((msgSend_void_rect)objc_msgSend)(upBtn, sel("setFrame:"), CGRectMake(104, 4, 30, 30));
+        id upBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.12, 0.16, 0.24, 0.92);
+        if (upBg) ((msgSend_void_id)objc_msgSend)(upBtn, sel("setBackgroundColor:"), upBg);
+
+        id uLayer = ((id (*)(id, SEL))objc_msgSend)(upBtn, sel("layer"));
+        if (uLayer) {
+            ((msgSend_void_double)objc_msgSend)(uLayer, sel("setCornerRadius:"), 15.0);
+            ((msgSend_void_double)objc_msgSend)(uLayer, sel("setBorderWidth:"), 1.0);
+            id uBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.2, 0.7, 1.0, 0.4);
+            if (uBorder) {
+                id cgUB = ((id (*)(id, SEL))objc_msgSend)(uBorder, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(uLayer, sel("setBorderColor:"), cgUB);
+            }
+            ((msgSend_void_long)objc_msgSend)(uLayer, sel("setMasksToBounds:"), 1);
+        }
+
+        id uTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "▲");
+        id cyanColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.25, 0.85, 1.0, 1.0);
+        ((msgSend_id_id_long)objc_msgSend)(upBtn, sel("setTitle:forState:"), uTitle, 0);
+        ((msgSend_id_id_long)objc_msgSend)(upBtn, sel("setTitleColor:forState:"), cyanColor, 0);
+
+        id uLbl = ((id (*)(id, SEL))objc_msgSend)(upBtn, sel("titleLabel"));
+        if (uLbl && uiFont) {
+            id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 13.0);
+            if (font) ((msgSend_void_id)objc_msgSend)(uLbl, sel("setFont:"), font);
+        }
+
+        ((msgSend_void_id_sel_long)objc_msgSend)(upBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudUpStart:"), 1 << 0 /* TouchDown */);
+        ((msgSend_void_id_sel_long)objc_msgSend)(upBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudLiftStop:"), (1 << 6) | (1 << 7) | (1 << 8) /* TouchUp/Cancel */);
+        ((msgSend_void_id)objc_msgSend)(hudView, sel("addSubview:"), upBtn);
+        g_flyHudUpBtn = upBtn;
+    }
+
+    // 3. Down Button (frame: 138, 4, 30, 30)
+    id downBtn = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+    if (downBtn) {
+        ((msgSend_void_rect)objc_msgSend)(downBtn, sel("setFrame:"), CGRectMake(138, 4, 30, 30));
+        id downBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.12, 0.16, 0.24, 0.92);
+        if (downBg) ((msgSend_void_id)objc_msgSend)(downBtn, sel("setBackgroundColor:"), downBg);
+
+        id dLayer = ((id (*)(id, SEL))objc_msgSend)(downBtn, sel("layer"));
+        if (dLayer) {
+            ((msgSend_void_double)objc_msgSend)(dLayer, sel("setCornerRadius:"), 15.0);
+            ((msgSend_void_double)objc_msgSend)(dLayer, sel("setBorderWidth:"), 1.0);
+            id dBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.2, 0.7, 1.0, 0.4);
+            if (dBorder) {
+                id cgDB = ((id (*)(id, SEL))objc_msgSend)(dBorder, sel("CGColor"));
+                ((msgSend_void_id)objc_msgSend)(dLayer, sel("setBorderColor:"), cgDB);
+            }
+            ((msgSend_void_long)objc_msgSend)(dLayer, sel("setMasksToBounds:"), 1);
+        }
+
+        id dTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), "▼");
+        id cyanColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.25, 0.85, 1.0, 1.0);
+        ((msgSend_id_id_long)objc_msgSend)(downBtn, sel("setTitle:forState:"), dTitle, 0);
+        ((msgSend_id_id_long)objc_msgSend)(downBtn, sel("setTitleColor:forState:"), cyanColor, 0);
+
+        id dLbl = ((id (*)(id, SEL))objc_msgSend)(downBtn, sel("titleLabel"));
+        if (dLbl && uiFont) {
+            id font = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("boldSystemFontOfSize:"), 13.0);
+            if (font) ((msgSend_void_id)objc_msgSend)(dLbl, sel("setFont:"), font);
+        }
+
+        ((msgSend_void_id_sel_long)objc_msgSend)(downBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudDownStart:"), 1 << 0 /* TouchDown */);
+        ((msgSend_void_id_sel_long)objc_msgSend)(downBtn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("onFlyHudLiftStop:"), (1 << 6) | (1 << 7) | (1 << 8) /* TouchUp/Cancel */);
+        ((msgSend_void_id)objc_msgSend)(hudView, sel("addSubview:"), downBtn);
+        g_flyHudDownBtn = downBtn;
+    }
+
+    // Pan drag gesture to move the Fly HUD anywhere on screen
+    if (panCls) {
+        id hudPan = ((id (*)(id, SEL, id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)panCls, sel("alloc")), sel("initWithTarget:action:"), g_uiMgr, sel("handleFloatPan:"));
+        if (hudPan) {
+            ((msgSend_void_id)objc_msgSend)(hudView, sel("addGestureRecognizer:"), hudPan);
+        }
+    }
+
+    ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), hudView);
+    ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), hudView);
+
+    g_flyHudView = hudView;
+    printf("[FlyMenuUI] On-screen Floating Fly HUD created on UIWindow\n");
+}
+
+static void ensureFloatingFlyHUD(id win) {
+    if (!win) return;
+    if (!g_flyHudView) {
+        createFloatingFlyHUD(win);
+        return;
+    }
+    id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_flyHudView, sel("superview"));
+    if (!curSuper) {
+        ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_flyHudView);
+        ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_flyHudView);
+    }
+}
+
 static void setupMenuUI(id win, id panel) {
     if (!panel || !win) return;
     long tag = (long)((long (*)(id, SEL))objc_msgSend)(panel, sel("tag"));
@@ -1444,7 +1656,7 @@ static void setupMenuUI(id win, id panel) {
         if (defs) {
             Class strCls = cls("NSString");
             if (strCls) {
-                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", NULL};
+                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw_esp", "sw_aimsmooth", NULL};
                 for (int k = 0; resetKeys[k]; k++) {
                     id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), resetKeys[k]);
                     if (key) {
@@ -1852,6 +2064,22 @@ static void setupMenuUI(id win, id panel) {
             }
         }
 
+        // For button 4 (ESP), cleanly remove raw FlyMenu_core targets and wire to custom toggleEsp:
+        if (i == 4) {
+            id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
+            if (allTargets) {
+                id enumerator = ((id (*)(id, SEL))objc_msgSend)(allTargets, sel("objectEnumerator"));
+                if (enumerator) {
+                    id t;
+                    while ((t = ((id (*)(id, SEL))objc_msgSend)(enumerator, sel("nextObject")))) {
+                        ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), t, NULL, 0x0FFFFFFF);
+                    }
+                }
+            }
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleEsp:"), 1 << 6);
+        }
+
         // For button 5 (Flight Diagnostics & Info), cleanly remove all existing targets (e.g. ROSFlyTestTarget) and attach custom info modal
         if (i == 5) {
             id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
@@ -1872,8 +2100,9 @@ static void setupMenuUI(id win, id panel) {
         ((msgSend_void_id)objc_msgSend)(panel, sel("bringSubviewToFront:"), btn);
     }
 
-    // 7. Ensure Floating Logo Button is on the active window
+    // 7. Ensure Floating Logo Button and on-screen Fly HUD are on the active window
     ensureFloatingButtonOnWindow(win);
+    ensureFloatingFlyHUD(win);
 }
 
 static inline void safePyDecref(void *obj) {
@@ -1963,6 +2192,113 @@ static void toggleAimSmooth_imp(id self, SEL _cmd, id sender) {
     runCombatPython(pyCmd);
 
     printf("[FlyMenuUI] Aim Smooth 100%% Auto toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+}
+
+static BOOL runFlyPython(const char *cmd) {
+    if (!cmd) return NO;
+    uint32_t count = _dyld_image_count();
+    intptr_t coreSlide = 0;
+    BOOL foundCore = NO;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *name = _dyld_get_image_name(i);
+        if (name && strstr(name, "FlyMenu_core")) {
+            coreSlide = _dyld_get_image_vmaddr_slide(i);
+            foundCore = YES;
+            break;
+        }
+    }
+    if (!foundCore) return NO;
+
+    void **pModuleDict = (void **)(coreSlide + 0xc0e8);
+    if (!pModuleDict || !(*pModuleDict)) return NO;
+
+    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
+    void **pPyErrClear = (void **)(coreSlide + 0xc110);
+    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
+    void **pPyRunString = (void **)(coreSlide + 0xc138);
+
+    if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
+        !pPyGILStateRelease || !*pPyGILStateRelease ||
+        !pPyRunString || !*pPyRunString) {
+        return NO;
+    }
+
+    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
+    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
+    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
+    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
+
+    int gstate = PyGILState_Ensure();
+    void *dict = *pModuleDict;
+    BOOL ok = NO;
+    if (dict) {
+        void *res = PyRun_String(cmd, 257 /* Py_single_input */, dict, dict);
+        if (res) {
+            safePyDecref(res);
+            ok = YES;
+        }
+        if (PyErr_Clear) PyErr_Clear();
+    }
+    PyGILState_Release(gstate);
+    return ok;
+}
+
+// ESP Laser & Box (Button 4)
+static void toggleEsp_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    updateRowStates();
+
+    char pyCmd[128];
+    snprintf(pyCmd, sizeof(pyCmd), "set_esp(%s)", newState ? "True" : "False");
+    runCombatPython(pyCmd);
+
+    printf("[FlyMenuUI] ESP Laser & Box toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+}
+
+// On-screen Fly HUD Actions
+static void onFlyHudToggle_imp(id self, SEL _cmd, id sender) {
+    if (g_coreBtns[0]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[0], sel("sendActionsForControlEvents:"), 1 << 6);
+    }
+    runFlyPython("handle('toggle', 0)");
+    updateRowStates();
+}
+
+static void onFlyHudUpStart_imp(id self, SEL _cmd, id sender) {
+    if (g_coreBtns[1]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[1], sel("sendActionsForControlEvents:"), 1 << 0);
+    }
+    runFlyPython("handle('lift', 1)");
+}
+
+static void onFlyHudDownStart_imp(id self, SEL _cmd, id sender) {
+    if (g_coreBtns[2]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[2], sel("sendActionsForControlEvents:"), 1 << 0);
+    }
+    runFlyPython("handle('lift', -1)");
+}
+
+static void onFlyHudLiftStop_imp(id self, SEL _cmd, id sender) {
+    if (g_coreBtns[1]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[1], sel("sendActionsForControlEvents:"), 1 << 6);
+    }
+    if (g_coreBtns[2]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[2], sel("sendActionsForControlEvents:"), 1 << 6);
+    }
+    runFlyPython("handle('lift', 0)");
 }
 
 // Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
@@ -2186,9 +2522,22 @@ static void updateESPOverlay(id win) {
     ensureESPOverlay(win);
     if (!g_espOverlay) return;
 
-    // Check if ESP is ON in core button
+    // Check if ESP is ON in core button or persisted preferences
     BOOL espActive = NO;
-    if (g_coreBtns[4]) {
+    Class defsCls = cls("NSUserDefaults");
+    if (defsCls) {
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (defs) {
+            Class strCls = cls("NSString");
+            if (strCls) {
+                id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+                if (key) {
+                    espActive = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+                }
+            }
+        }
+    }
+    if (!espActive && g_coreBtns[4]) {
         id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[4], sel("titleForState:"), 0);
         const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
         espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
@@ -2211,7 +2560,7 @@ static void updateESPOverlay(id win) {
     static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
         s_emptyFrames++;
-        if (s_emptyFrames > 15) {
+        if (s_emptyFrames > 45) {
             if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
             if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
             if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -2397,8 +2746,9 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
     id win = getActiveWindow();
     if (!win) return;
 
-    // 1. Ensure floating logo button is created and present on window
+    // 1. Ensure floating logo button and on-screen Fly HUD are present on window
     ensureFloatingButtonOnWindow(win);
+    ensureFloatingFlyHUD(win);
 
     // 2. Discover and hook FlyMenu_core panel across windows safely
     if (!g_panel) {
@@ -2568,6 +2918,11 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleNoRecoil:"), (IMP)toggleNoRecoil_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleWallhack:"), (IMP)toggleWallhack_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("onFlyHudToggle:"), (IMP)onFlyHudToggle_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("onFlyHudUpStart:"), (IMP)onFlyHudUpStart_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("onFlyHudDownStart:"), (IMP)onFlyHudDownStart_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("onFlyHudLiftStop:"), (IMP)onFlyHudLiftStop_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");
@@ -2578,6 +2933,11 @@ static void initFlyMenuUI(void) {
         uiMgrCls = cls("ROSUIManager");
         if (uiMgrCls) {
             class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("onFlyHudToggle:"), (IMP)onFlyHudToggle_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("onFlyHudUpStart:"), (IMP)onFlyHudUpStart_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("onFlyHudDownStart:"), (IMP)onFlyHudDownStart_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("onFlyHudLiftStop:"), (IMP)onFlyHudLiftStop_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("showCustomInfo:"), (IMP)showCustomInfo_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("closeInfoModal:"), (IMP)closeInfoModal_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("openTelegramGroup:"), (IMP)openTelegramGroup_imp, "v@:@");

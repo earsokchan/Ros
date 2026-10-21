@@ -622,9 +622,11 @@ def handle(action):
             if not _aim and not _aim_smooth and not _esp:
                 _clear_frame()
         elif action == 'off':
-            _esp = _aim = _aim_smooth = False
-            _esp_state = _aim_state = 0
-            _clear_frame()
+            _aim = False
+            _aim_state = 0
+            _target_id = None
+            if not _esp and not _aim_smooth:
+                _clear_frame()
         else:
             raise ValueError('Unknown combat request')
         _last_error = ''
@@ -637,6 +639,24 @@ def handle(action):
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         return True
+
+
+def set_esp(val):
+    global _esp, _esp_state, _last_error
+    try:
+        _esp = bool(val)
+        _esp_state = 1 if _esp else 0
+        if _esp:
+            _ensure_timer()
+        else:
+            _write_esp_file('')
+            if not _aim and not _aim_smooth:
+                _clear_frame()
+                _stop_timer()
+        return _esp
+    except Exception as error:
+        _last_error = '%s: %s' % (type(error).__name__, error)
+        return False
 
 
 def set_aim_smooth(val):
