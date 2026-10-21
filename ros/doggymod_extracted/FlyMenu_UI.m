@@ -2741,7 +2741,16 @@ static char *getESPSnapshot(void) {
     // Check if FlyMenu_core's combat engine has successfully initialized and is ready
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
     if (!pCombatReady || *pCombatReady != 1) {
-        return NULL; // Zero-risk: return NULL immediately while game is booting or ESP is off
+        static int s_attemptInit = 0;
+        if (++s_attemptInit % 30 == 1) {
+            int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
+            if (ensureCombat) {
+                ensureCombat();
+            }
+        }
+        if (!pCombatReady || *pCombatReady != 1) {
+            return NULL;
+        }
     }
 
     void **pCombatDict = (void **)(coreSlide + 0xc168);
@@ -2851,13 +2860,15 @@ static void ensureESPOverlay(id win) {
     if (shapeCls && uiColor && overlayLayer) {
         id redC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.20, 0.20, 0.90);
         id greenC = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 1.0, 0.40, 0.98);
+        id clearC = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("clearColor"));
+        id clearCG = clearC ? ((id (*)(id, SEL))objc_msgSend)(clearC, sel("CGColor")) : NULL;
 
         // Red Line Layer (blocked enemies)
         id rLine = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
         ((msgSend_void_rect)objc_msgSend)(rLine, sel("setFrame:"), bounds);
         if (redC) ((msgSend_void_id)objc_msgSend)(rLine, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(redC, sel("CGColor")));
-        ((msgSend_void_double)objc_msgSend)(rLine, sel("setLineWidth:"), 1.4);
-        ((msgSend_void_id)objc_msgSend)(rLine, sel("setFillColor:"), NULL);
+        ((msgSend_void_double)objc_msgSend)(rLine, sel("setLineWidth:"), 1.6);
+        if (clearCG) ((msgSend_void_id)objc_msgSend)(rLine, sel("setFillColor:"), clearCG);
         ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), rLine);
         g_espRedLineLayer = rLine;
 
@@ -2865,8 +2876,8 @@ static void ensureESPOverlay(id win) {
         id gLine = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
         ((msgSend_void_rect)objc_msgSend)(gLine, sel("setFrame:"), bounds);
         if (greenC) ((msgSend_void_id)objc_msgSend)(gLine, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(greenC, sel("CGColor")));
-        ((msgSend_void_double)objc_msgSend)(gLine, sel("setLineWidth:"), 1.8);
-        ((msgSend_void_id)objc_msgSend)(gLine, sel("setFillColor:"), NULL);
+        ((msgSend_void_double)objc_msgSend)(gLine, sel("setLineWidth:"), 2.0);
+        if (clearCG) ((msgSend_void_id)objc_msgSend)(gLine, sel("setFillColor:"), clearCG);
         ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), gLine);
         g_espGreenLineLayer = gLine;
 
@@ -2874,8 +2885,8 @@ static void ensureESPOverlay(id win) {
         id rBox = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
         ((msgSend_void_rect)objc_msgSend)(rBox, sel("setFrame:"), bounds);
         if (redC) ((msgSend_void_id)objc_msgSend)(rBox, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(redC, sel("CGColor")));
-        ((msgSend_void_double)objc_msgSend)(rBox, sel("setLineWidth:"), 1.2);
-        ((msgSend_void_id)objc_msgSend)(rBox, sel("setFillColor:"), NULL);
+        ((msgSend_void_double)objc_msgSend)(rBox, sel("setLineWidth:"), 1.4);
+        if (clearCG) ((msgSend_void_id)objc_msgSend)(rBox, sel("setFillColor:"), clearCG);
         ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), rBox);
         g_espRedBoxLayer = rBox;
 
@@ -2883,9 +2894,13 @@ static void ensureESPOverlay(id win) {
         id gBox = ((id (*)(id, SEL))objc_msgSend)((id)shapeCls, sel("layer"));
         ((msgSend_void_rect)objc_msgSend)(gBox, sel("setFrame:"), bounds);
         if (greenC) ((msgSend_void_id)objc_msgSend)(gBox, sel("setStrokeColor:"), ((id (*)(id, SEL))objc_msgSend)(greenC, sel("CGColor")));
-        ((msgSend_void_double)objc_msgSend)(gBox, sel("setLineWidth:"), 1.6);
+        ((msgSend_void_double)objc_msgSend)(gBox, sel("setLineWidth:"), 1.8);
         id subtleGreenFill = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.0, 1.0, 0.40, 0.08);
-        if (subtleGreenFill) ((msgSend_void_id)objc_msgSend)(gBox, sel("setFillColor:"), ((id (*)(id, SEL))objc_msgSend)(subtleGreenFill, sel("CGColor")));
+        if (subtleGreenFill) {
+            ((msgSend_void_id)objc_msgSend)(gBox, sel("setFillColor:"), ((id (*)(id, SEL))objc_msgSend)(subtleGreenFill, sel("CGColor")));
+        } else if (clearCG) {
+            ((msgSend_void_id)objc_msgSend)(gBox, sel("setFillColor:"), clearCG);
+        }
         ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), gBox);
         g_espGreenBoxLayer = gBox;
     }
@@ -2943,6 +2958,13 @@ static void updateESPOverlay(id win) {
     if (!win) return;
     ensureESPOverlay(win);
     if (!g_espOverlay) return;
+
+    CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
+    ((msgSend_void_rect)objc_msgSend)(g_espOverlay, sel("setFrame:"), winBounds);
+    if (g_espRedLineLayer) ((msgSend_void_rect)objc_msgSend)(g_espRedLineLayer, sel("setFrame:"), winBounds);
+    if (g_espGreenLineLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenLineLayer, sel("setFrame:"), winBounds);
+    if (g_espRedBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espRedBoxLayer, sel("setFrame:"), winBounds);
+    if (g_espGreenBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenBoxLayer, sel("setFrame:"), winBounds);
 
     // Check if ESP is ON in core button or persisted preferences
     BOOL espActive = NO;
@@ -3008,7 +3030,7 @@ static void updateESPOverlay(id win) {
     id redBoxP = ((id (*)(id, SEL))objc_msgSend)((id)pathCls, sel("bezierPath"));
     id greenBoxP = ((id (*)(id, SEL))objc_msgSend)((id)pathCls, sel("bezierPath"));
 
-    CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
+    winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
     double winW = winBounds.size.width;
     double winH = winBounds.size.height;
     double startX = winW * 0.5;
@@ -3239,6 +3261,13 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
                         snprintf(pyCmd, sizeof(pyCmd), "set_aim(%s)", curAim ? "True" : "False");
                         runCombatPython(pyCmd);
                     }
+                    id kEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+                    if (kEsp) {
+                        BOOL curEsp = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kEsp);
+                        char pyCmd[128];
+                        snprintf(pyCmd, sizeof(pyCmd), "set_esp(%s)", curEsp ? "True" : "False");
+                        runCombatPython(pyCmd);
+                    }
                 }
             }
         }
@@ -3251,6 +3280,12 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
                     ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
                 }
                 ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_espOverlay);
+            }
+            if (g_panel) {
+                id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+                if (pSuper) {
+                    ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
+                }
             }
             if (g_floatBtn) {
                 id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));

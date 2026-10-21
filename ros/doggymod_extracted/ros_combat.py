@@ -79,16 +79,28 @@ def _bindings():
     if not callable(point):
         point = getattr(client, 'getAimPos', None)
     if not callable(point):
-        raise Waiting('Missing cached getModelCenter/getAimPos')
+        def _fallback_point(target_go):
+            try:
+                t = getattr(target_go, 'transform', None)
+                if t is not None:
+                    return t.position
+            except Exception:
+                pass
+            return None
+        point = _fallback_point
     game3d = sys.modules.get('game3d')
     if game3d is None:
         game3d = _binding('game3d', (_movement, canvas))
     Vector2 = _binding('Vector2', candidates)
-    Physics = _binding('Physics', candidates)
-    RaycastHit = _binding('RaycastHit', candidates)
+    Physics = None
+    RaycastHit = None
+    try:
+        Physics = _binding('Physics', candidates)
+        RaycastHit = _binding('RaycastHit', candidates)
+    except Exception:
+        pass
     for obj, name in ((monitor, 'allEnemys'), (service, 'isAvatar'),
-                      (service, 'isRobot'), (game3d, 'get_window_size'),
-                      (Physics, 'RaycastWithScene')):
+                      (service, 'isRobot'), (game3d, 'get_window_size')):
         if not callable(getattr(obj, name, None)):
             raise Waiting('Missing live interface: ' + name)
     return Camera, monitor, service, point, game3d, Vector2, Physics, RaycastHit
@@ -130,77 +142,80 @@ def _angle_between(left, right):
 
 
 def _screen_point(camera, point, resolution, origin, forward):
-    xyz = _xyz(point)
-    direction = tuple(a - b for a, b in zip(xyz, origin))
-    # Check the actual camera forward; do not assume camera-space Z sign.
-    if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
+    try:
+        xyz = _xyz(point)
+        direction = tuple(a - b for a, b in zip(xyz, origin))
+        # Check the actual camera forward; do not assume camera-space Z sign.
+        if sum(a * b for a, b in zip(direction, forward)) <= 0.00001:
+            return None
+        projected = camera.WorldToScreenPoint(point)
+        if projected is None:
+            return None
+        pz = getattr(projected, 'z', None)
+        if pz is not None and float(pz) <= 0.0001:
+            return None
+        px = getattr(projected, 'x', None)
+        py = getattr(projected, 'y', None)
+        if px is None or py is None:
+            return None
+        x = _finite(px) / resolution[0]
+        # Invert Y from Unity bottom-left (0,0) to UIKit top-left (0,0)
+        y = 1.0 - (_finite(py) / resolution[1])
+        # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
+        if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
+            return None
+        return x, y, direction
+    except Exception:
         return None
-    projected = camera.WorldToScreenPoint(point)
-    x, y = _finite(projected.x) / resolution[0], _finite(projected.y) / resolution[1]
-    # Allow generous periphery margins so bounding boxes and snaplines do not flicker or vanish
-    if not (-0.35 <= x <= 1.35 and -0.35 <= y <= 1.35):
-        return None
-    return x, y, direction
 
 
 def _enemy(go, player, service):
     try:
+        if go is None:
+            return False
+        # Do not target local player's game object
+        p_go = getattr(player, 'gameObject', None)
+        if go is player or (p_go is not None and go is p_go):
+            return False
+
         entity = getattr(go, 'entity', None)
-        local = getattr(player, 'entity', None)
-        if entity is None or local is None or entity.id == local.id:
-            return False
+        local = getattr(player, 'entity', None) if player is not None else None
 
-        # Teammate check via live engine method
-        if callable(getattr(local, 'isBattleMate', None)):
-            try:
-                if local.isBattleMate(entity.id):
-                    return False
-            except Exception:
-                pass
+        if entity is not None and local is not None:
+            eid = getattr(entity, 'id', None)
+            lid = getattr(local, 'id', None)
+            if eid is not None and lid is not None and eid == lid:
+                return False
 
-        # Camp check: only compare when both camp types are valid positive teams
-        camp_e = getattr(entity, 'campType', None)
-        camp_l = getattr(local, 'campType', None)
-        if camp_e is not None and camp_l is not None:
-            try:
-                ce = int(camp_e)
-                cl = int(camp_l)
-                if ce > 0 and cl > 0 and ce == cl:
-                    return False
-            except Exception:
-                pass
+            # Teammate check via live engine method
+            if callable(getattr(local, 'isBattleMate', None)):
+                try:
+                    if eid is not None and local.isBattleMate(eid):
+                        return False
+                except Exception:
+                    pass
 
-        # Dead check: only reject if actually dead in game (turned to loot box)
-        # Downed / knocked / crawling players have hp == 0 but deadInGame == False!
-        if getattr(entity, 'deadInGame', False):
-            return False
+            # Camp check: only compare when both camp types are valid positive teams
+            camp_e = getattr(entity, 'campType', None)
+            camp_l = getattr(local, 'campType', None)
+            if camp_e is not None and camp_l is not None:
+                try:
+                    ce = int(camp_e)
+                    cl = int(camp_l)
+                    if ce > 0 and cl > 0 and ce == cl:
+                        return False
+                except Exception:
+                    pass
 
-        # Entity type verification
-        is_avatar = False
-        is_robot = False
-        try:
-            is_avatar = bool(service.isAvatar(entity))
-        except Exception:
-            pass
-        try:
-            is_robot = bool(service.isRobot(entity))
-        except Exception:
-            pass
+            # Dead check: only reject if actually dead in game (turned to loot box)
+            # Downed / knocked / crawling players have hp == 0 but deadInGame == False!
+            if getattr(entity, 'deadInGame', False):
+                return False
 
-        # If ServiceAPI cannot classify, check class name or treat combat units as enemies
-        if not (is_avatar or is_robot):
-            cname = getattr(entity, '__class__', None)
-            cname_str = getattr(cname, '__name__', '') if cname else ''
-            low_c = cname_str.lower()
-            if any(k in low_c for k in ('avatar', 'player', 'robot', 'combat', 'human', 'npc', 'vehicle')):
-                is_avatar = True
-            elif hasattr(go, 'GetComponent'):
-                if go.GetComponent('CombatUnit') is not None or go.GetComponent('MoveUnit') is not None:
-                    is_avatar = True
-
+        # Objects coming from monitor.allEnemys() that passed teammate checks are valid targets
         return True
     except Exception:
-        return False
+        return True
 
 _weapon_debug = ''  # diagnostic string for weapon detection state
 
@@ -492,11 +507,19 @@ def is_holding_gun():
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
-    direction = point - camera_position
-    distance = _finite(direction.magnitude)
-    if distance <= 0.00001:
-        return False
-    return not Physics.RaycastWithScene(camera_position, direction, RaycastHit(), distance)
+    try:
+        if Physics is None or RaycastHit is None:
+            return True
+        if not hasattr(Physics, 'RaycastWithScene'):
+            return True
+        direction = point - camera_position
+        distance = _finite(getattr(direction, 'magnitude', 0.0))
+        if distance <= 0.00001:
+            return False
+        hit = RaycastHit()
+        return not Physics.RaycastWithScene(camera_position, direction, hit, distance)
+    except Exception:
+        return True
 
 
 def _extract_real_name(entity, go):
@@ -742,16 +765,17 @@ def _tick():
                 x = projected[0] if projected is not None else -1.0
                 y = projected[1] if projected is not None else -1.0
                 entity = getattr(go, 'entity', None)
-                if entity is None:
-                    continue
-                is_inv = getattr(entity, 'invincible', False)
-                if callable(is_inv):
+                eid = getattr(entity, 'id', None) if entity is not None else id(go)
+                is_inv = False
+                if entity is not None:
                     try:
-                        is_inv = is_inv()
+                        is_inv = getattr(entity, 'invincible', False)
+                        if callable(is_inv):
+                            is_inv = is_inv()
+                        is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
                     except Exception:
                         is_inv = False
-                is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
-                candidates.append((angle, entity.id, x, y, point, direction,
+                candidates.append((angle, eid, x, y, point, direction,
                                    go, distance2, is_inv, projected is not None))
             except Exception as error:
                 # A despawning or not-yet-rendered object cannot become a target.
@@ -783,7 +807,7 @@ def _tick():
                     box_h = max(0.016, min(0.85, 2.0 / (dist_val + 0.5)))
                     box_w = box_h * 0.48
                     box_x = max(0.0, min(1.0 - box_w, c[2] - box_w * 0.5))
-                    box_y = max(0.0, min(1.0 - box_h, c[3] - box_h * 0.45))
+                    box_y = max(0.0, min(1.0 - box_h, c[3] - box_h * 0.5))
 
                     # Real player name (avoiding engine clone names)
                     clean_name = _extract_real_name(entity, go)
