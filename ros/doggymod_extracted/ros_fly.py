@@ -246,20 +246,23 @@ def set_speed(value):
 
 
 def _target():
-    player = getattr(Globals, 'player', None)
-    if player is None:
+    try:
+        player = getattr(Globals, 'player', None)
+        if player is None:
+            return None
+        unit = player.GetComponent('MoveUnit')
+        if unit is None:
+            return None
+        entity = getattr(player, 'entity', None)
+        character = getattr(unit, 'character', None)
+        if entity is None or character is None:
+            return None
+        # The component and native character must agree about entity ownership.
+        if unit.gameObject.entity.id != entity.id or character.bindingEntityID != entity.id:
+            return None
+        return unit, character, entity.id
+    except Exception:
         return None
-    unit = player.GetComponent('MoveUnit')
-    if unit is None:
-        return None
-    entity = getattr(player, 'entity', None)
-    character = getattr(unit, 'character', None)
-    if entity is None or character is None:
-        return None
-    # The component and native character must agree about entity ownership.
-    if unit.gameObject.entity.id != entity.id or character.bindingEntityID != entity.id:
-        return None
-    return unit, character, entity.id
 
 
 def _tick():

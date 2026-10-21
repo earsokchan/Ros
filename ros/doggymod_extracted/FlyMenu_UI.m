@@ -103,11 +103,16 @@ static void createFloatingAimHUD(id win);
 static inline void safePyDecref(void *obj) {
     if (!obj) return;
     int64_t *ref = (int64_t *)obj;
-    if (--(*ref) == 0) {
+    if (*ref > 1) {
+        (*ref)--;
+    } else if (*ref == 1) {
         void *tp = *((void **)obj + 1);
         if (tp) {
             void (*dealloc)(void *) = *(void **)((uintptr_t)tp + 0x30);
-            if (dealloc) dealloc(obj);
+            if (dealloc) {
+                *ref = 0;
+                dealloc(obj);
+            }
         }
     }
 }
@@ -292,7 +297,6 @@ static void purgeROSDebViews(void) {
             ((msgSend_void_long)objc_msgSend)(mv, sel("setHidden:"), 1);
             ((id (*)(id, SEL))objc_msgSend)(mv, sel("removeFromSuperview"));
         }
-        *pMenuView = NULL;
     }
 
     // 2. Safely hide and detach FPSDisplay's label (FPSDisplay is an NSObject, NOT a UIView)
@@ -1283,16 +1287,28 @@ static void updateAimSmoothHudState(void) {
                 aimText = "AIM: IDLE";
                 btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.80, 0.55, 0.05, 0.92);
                 brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.80, 0.20, 0.85);
-            } else {
+            } else if (gunHolding == 1) {
                 // Holding a gun -> Active Aimlock!
                 aimText = "AIM: ON";
                 btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
                 brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90);
+            } else {
+                // In lobby or combat unready
+                aimText = "AIM: READY";
+                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.16, 0.22, 0.32, 0.92);
+                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.50);
             }
         }
 
-        id aimTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
-        ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), aimTitle, 0);
+        static id s_lastTitle = NULL;
+        static const char *s_lastText = NULL;
+        if (!s_lastText || strcmp(s_lastText, aimText) != 0) {
+            s_lastTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
+            s_lastText = aimText;
+        }
+        if (s_lastTitle) {
+            ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), s_lastTitle, 0);
+        }
         ((msgSend_void_id)objc_msgSend)(g_aimHudToggleBtn, sel("setBackgroundColor:"), btnBg);
 
         id tLayer = ((id (*)(id, SEL))objc_msgSend)(g_aimHudToggleBtn, sel("layer"));
@@ -1775,24 +1791,26 @@ static void ensureFloatingFlyHUD(id win) {
 
 // Queries Python combat engine to check if avatar is currently holding a firearm (1) vs bare hands (0)
 static int checkPlayerHoldingGun(void) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            break;
+    static intptr_t s_cachedCoreSlide = 0;
+    static BOOL s_hasCoreSlide = NO;
+    if (!s_hasCoreSlide) {
+        uint32_t count = _dyld_image_count();
+        for (uint32_t i = 0; i < count; i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name && strstr(name, "FlyMenu_core")) {
+                s_cachedCoreSlide = _dyld_get_image_vmaddr_slide(i);
+                s_hasCoreSlide = YES;
+                break;
+            }
         }
     }
-    if (!coreSlide) return -1;
+    if (!s_hasCoreSlide) return -1;
+    intptr_t coreSlide = s_cachedCoreSlide;
+
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
-    if (!pCombatReady || *pCombatReady != 1) {
-        int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
-        if (ensureCombat) {
-            ensureCombat();
-        }
-    }
+    // Never force premature Python initialization during lobby/boot: return -1 immediately
     if (!pCombatReady || *pCombatReady != 1) return -1;
+
     void **pCombatDict = (void **)(coreSlide + 0xc168);
     if (!pCombatDict || !(*pCombatDict)) return -1;
     void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
@@ -1812,14 +1830,14 @@ static int checkPlayerHoldingGun(void) {
     int hasGun = -1;
     void *dict = *pCombatDict;
     if (dict) {
-        void *res = PyRun_String("str(1 if is_holding_gun() else 0)", 258 /* Py_eval_input */, dict, dict);
+        void *res = PyRun_String("is_holding_gun_str()", 258 /* Py_eval_input */, dict, dict);
         if (res) {
             if (PyString_AsString) {
                 char *s = PyString_AsString(res);
                 if (s) {
-                    if (s[0] == '1' || s[0] == 'T' || s[0] == 't') {
+                    if (strstr(s, "1")) {
                         hasGun = 1;
-                    } else if (s[0] == '0' || s[0] == 'F' || s[0] == 'f') {
+                    } else if (strstr(s, "0")) {
                         hasGun = 0;
                     }
                 }
@@ -2730,18 +2748,21 @@ static void onFlyHudLiftStop_imp(id self, SEL _cmd, id sender) {
 
 // Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
 static char *getESPSnapshot(void) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    BOOL foundCore = NO;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            foundCore = YES;
-            break;
+    static intptr_t s_cachedCoreSlide = 0;
+    static BOOL s_hasCoreSlide = NO;
+    if (!s_hasCoreSlide) {
+        uint32_t count = _dyld_image_count();
+        for (uint32_t i = 0; i < count; i++) {
+            const char *name = _dyld_get_image_name(i);
+            if (name && strstr(name, "FlyMenu_core")) {
+                s_cachedCoreSlide = _dyld_get_image_vmaddr_slide(i);
+                s_hasCoreSlide = YES;
+                break;
+            }
         }
     }
-    if (!foundCore) return NULL;
+    if (!s_hasCoreSlide) return NULL;
+    intptr_t coreSlide = s_cachedCoreSlide;
 
     // Check if FlyMenu_core's combat engine has successfully initialized and is ready
     uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
@@ -2955,12 +2976,13 @@ static void updateESPOverlay(id win) {
     if (defsCls) {
         id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
         if (defs) {
-            Class strCls = cls("NSString");
-            if (strCls) {
-                id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
-                if (key) {
-                    espActive = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-                }
+            static id s_keyEsp = NULL;
+            if (!s_keyEsp) {
+                Class strCls = cls("NSString");
+                if (strCls) s_keyEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+            }
+            if (s_keyEsp) {
+                espActive = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyEsp);
             }
         }
     }
@@ -2970,19 +2992,24 @@ static void updateESPOverlay(id win) {
         espActive = (strstr(s, ":ON") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "ESP") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3));
     }
 
-    char *snapStr = getESPSnapshot();
-    // If ESP is not active in the button AND Python has no live snapshot data, clear and return
-    if (!espActive && (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0)) {
-        if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
-        if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
-        if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
-        if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
-        for (int i = 0; i < MAX_ESP_LABELS; i++) {
-            if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+    // Zero GIL / Python overhead when ESP is disabled: clear layers and return immediately!
+    static BOOL s_clearedWhenOff = NO;
+    if (!espActive) {
+        if (!s_clearedWhenOff) {
+            if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
+            if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
+            if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
+            if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
+            for (int i = 0; i < MAX_ESP_LABELS; i++) {
+                if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
+            }
+            s_clearedWhenOff = YES;
         }
-        if (snapStr) free(snapStr);
         return;
     }
+    s_clearedWhenOff = NO;
+
+    char *snapStr = getESPSnapshot();
 
     static int s_emptyFrames = 0;
     if (!snapStr || strlen(snapStr) == 0 || strcmp(snapStr, "NONE") == 0) {
@@ -3199,8 +3226,8 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
     ensureFloatingFlyHUD(win);
     ensureFloatingAimHUD(win);
 
-    // Synchronize Floating Aim Smooth HUD with live avatar weapon state in real time
-    if (tickCount % 2 == 0) {
+    // Synchronize Floating Aim Smooth HUD with live avatar weapon state in real time (2 Hz)
+    if (tickCount % 5 == 0) {
         updateAimSmoothHudState();
     }
 

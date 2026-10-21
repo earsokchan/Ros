@@ -468,9 +468,23 @@ def _is_using_gun(player, local_entity):
 def is_holding_gun():
     """
     Exposed helper to check if avatar is currently holding a gun.
-    Returns 1 if holding a firearm, 0 if using bare hands / melee / throwables.
+    Returns 1 if holding a firearm, 0 if using bare hands / melee / throwables / in lobby.
     """
     try:
+        # Check if in a match scene first
+        if _fly:
+            try:
+                target_fn = getattr(_fly, '_target', None)
+                if callable(target_fn):
+                    t = target_fn()
+                    if not t:
+                        return 0
+                    u = t[0]
+                    if not getattr(u, 'chInScene', False):
+                        return 0
+            except Exception:
+                return 0
+
         g = sys.modules.get('Globals')
         if g is None and 'Globals' in globals():
             g = Globals
@@ -488,7 +502,12 @@ def is_holding_gun():
             entity = getattr(g, 'avatar', None) or getattr(g, 'entity', None)
         return 1 if _is_using_gun(player, entity) else 0
     except Exception:
-        return 1
+        return 0
+
+
+def is_holding_gun_str():
+    # Returns fresh dynamically joined string so Py_DECREF in C caller safely frees it
+    return ','.join(['GUN', '1' if is_holding_gun() else '0'])
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
@@ -688,6 +707,14 @@ def _tick():
         if local_entity is None:
             _waiting = 'Waiting for player.entity'
             return
+
+        # Crucial lobby check: player must have a valid physical character in an active match scene
+        if unit is None or character is None or not getattr(unit, 'chInScene', False):
+            _waiting = 'Waiting for battle / match scene'
+            _clear_frame()
+            _target_id = None
+            return
+
         if getattr(local_entity, 'deadInGame', False):
             _esp_state = 3 if _esp else 0
             _aim_state = 3 if _aim else 0
@@ -703,8 +730,15 @@ def _tick():
         camera = getattr(Camera, 'main', None)
         if camera is None:
             raise Waiting('Waiting for main camera')
-        camera_position = camera.transform.position
-        origin, forward = _xyz(camera_position), _xyz(camera.transform.forward)
+        try:
+            cam_tf = getattr(camera, 'transform', None)
+            if cam_tf is None:
+                raise Waiting('Waiting for camera transform')
+            camera_position = cam_tf.position
+            cam_fwd = cam_tf.forward
+            origin, forward = _xyz(camera_position), _xyz(cam_fwd)
+        except Exception:
+            raise Waiting('Waiting for camera transform')
         size = game3d.get_window_size()
         resolution = (_finite(size[0]), _finite(size[1]))
         if min(resolution) <= 1.0:
@@ -1013,7 +1047,7 @@ def snapshot():
 def esp_snapshot():
     global _esp, _last_esp_str, _frame_time, _last_error
     if not _esp:
-        return 'NONE'
+        return ','.join(['NONE'])
     now = time.time()
     if _timer is None or now - _last_tick > 3.0:
         try:
@@ -1023,8 +1057,10 @@ def esp_snapshot():
             _last_error = 'Timer recovery: %s: %s' % (type(error).__name__, error)
     age = now - _frame_time
     if age < 0.0 or age > 3.0:
-        return 'NONE'
-    return _last_esp_str or 'NONE'
+        return ','.join(['NONE'])
+    if _last_esp_str and _last_esp_str != 'NONE':
+        return ','.join([_last_esp_str])
+    return ','.join(['NONE'])
 
 
 def diagnostics():
