@@ -2327,7 +2327,7 @@ static void setupMenuUI(id win, id panel) {
         }
 
 
-        // For button 4 (ESP), permanently remove all targets and keep hidden:
+        // For button 4 (ESP), cleanly remove raw targets and wire to toggleEsp:
         if (i == 4) {
             id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
             if (allTargets) {
@@ -2340,7 +2340,9 @@ static void setupMenuUI(id win, id panel) {
                 }
             }
             ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
-            ((msgSend_void_long)objc_msgSend)(btn, sel("setHidden:"), 1);
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleEsp:"), 1 << 6);
+            ((msgSend_void_long)objc_msgSend)(btn, sel("setHidden:"), 0);
+            ((msgSend_void_long)objc_msgSend)(btn, sel("setUserInteractionEnabled:"), 1);
         }
 
         // For button 5 (Flight Diagnostics & Info), cleanly remove all existing targets (e.g. ROSFlyTestTarget) and attach custom info modal
