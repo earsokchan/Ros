@@ -243,252 +243,21 @@ def _enemy(go, player, service):
     except Exception:
         return False
 
-_weapon_debug = ''  # diagnostic string for weapon detection state
-
-
-_last_logged_debug = ''
-
-
-def _log_weapon_debug(info):
-    pass
-
-
-def _is_using_gun(player, local_entity):
-    """
-    Detect if the player is actively holding a firearm (gun) vs bare hands / fists / melee / throwables.
-    Returns:
-      True  = Holding a gun -> Aim Smooth automatically locks and tracks enemy.
-      False = Bare hands / fists / melee / grenade -> Aim Smooth does NOT lock, screen scrolls freely.
-    """
-    global _weapon_debug
-    try:
-        Globals_mod = sys.modules.get('Globals')
-        if Globals_mod is None and 'Globals' in globals():
-            Globals_mod = Globals
-        avatar = getattr(Globals_mod, 'avatar', None) if Globals_mod else None
-
-        if player is None and Globals_mod is not None:
-            player = getattr(Globals_mod, 'player', None) or getattr(Globals_mod, 'local_player', None)
-        if local_entity is None and player is not None:
-            local_entity = getattr(player, 'entity', None)
-        if local_entity is None and avatar is not None:
-            local_entity = getattr(avatar, 'entity', None) or avatar
-
-        # Primary character objects and their weapon/equip components
-        char_objs = []
-        for l, o in [('entity', local_entity), ('player', player), ('avatar', avatar)]:
-            if o is not None and o not in [x[1] for x in char_objs]:
-                char_objs.append((l, o))
-                for comp_name in ('weapon_comp', 'weapon_component', 'weaponComponent', 'equip_comp', 'equip_component', 'weapon_mgr', 'weapon_bag'):
-                    try:
-                        comp = getattr(o, comp_name, None)
-                        if comp is not None and comp not in [x[1] for x in char_objs]:
-                            char_objs.append(('%s.%s' % (l, comp_name), comp))
-                    except Exception:
-                        pass
-
-        # BigWorld player entity
-        bw = sys.modules.get('BigWorld')
-        if bw is not None:
-            try:
-                bwp = getattr(bw, 'player', None)
-                if callable(bwp):
-                    bwp = bwp()
-                if bwp is not None and bwp not in [x[1] for x in char_objs]:
-                    char_objs.append(('BigWorld.player', bwp))
-            except Exception:
-                pass
-
-
-        # ===== CHECK 1: Check Explicit Unarmed / Fist / Bare Hand Indicators =====
-        unarmed_attrs = (
-            'is_unarmed', 'isUnarmed', 'unarmed', 'is_bare_hand', 'isBareHand',
-            'bare_hand', 'bareHand', 'is_fist', 'isFist', 'fist', 'is_empty_hand',
-            'no_weapon', 'noweapon', '_isUnarmed', '_unarmed', '_isBareHand'
-        )
-        for label, obj in char_objs:
-            if obj is None:
-                continue
-            for u_name in unarmed_attrs:
-                if hasattr(obj, u_name):
-                    try:
-                        val = getattr(obj, u_name)
-                        if callable(val):
-                            val = val()
-                        if bool(val):
-                            _weapon_debug = '%s.%s=True->False(Bare Hands)' % (label, u_name)
-                            _log_weapon_debug(_weapon_debug)
-                            return False
-                    except Exception:
-                        pass
-
-        # ===== CHECK 2: Equip Slot / Position on Character =====
-        # 0 = Bare hands/fists
-        # 1, 2 = Primary Guns
-        # 3 = Secondary Pistol
-        # 4 = Melee (pan, crowbar, chicken)
-        # 5 = Grenades / Throwables
-        slot_attrs = (
-            'cur_equip_pos', 'curEquipPos', 'equip_pos', 'equipPos',
-            'cur_slot', 'curSlot', 'cur_weapon_pos', 'curWeaponPos'
-        )
-        for label, obj in char_objs:
-            if obj is None:
-                continue
-            for s_name in slot_attrs:
-                if hasattr(obj, s_name):
-                    try:
-                        val = getattr(obj, s_name)
-                        if callable(val):
-                            val = val()
-                        if val is not None:
-                            pos_int = int(val)
-                            if pos_int == 0:
-                                _weapon_debug = '%s.%s=0->False(Bare Hands)' % (label, s_name)
-                                _log_weapon_debug(_weapon_debug)
-                                return False
-                            if pos_int in (4, 5):
-                                _weapon_debug = '%s.%s=%d->False(Melee/Grenade)' % (label, s_name, pos_int)
-                                _log_weapon_debug(_weapon_debug)
-                                return False
-                            if pos_int in (1, 2, 3):
-                                _weapon_debug = '%s.%s=%d->True(Gun Slot)' % (label, s_name, pos_int)
-                                _log_weapon_debug(_weapon_debug)
-                                return True
-                    except Exception:
-                        pass
-
-        # ===== CHECK 3: Active Weapon Instance / ID =====
-        for label, obj in char_objs:
-            if obj is None:
-                continue
-            for w_name in ('cur_weapon', 'curWeapon', 'hold_weapon', 'holdWeapon', 'current_weapon', 'active_weapon', 'weapon'):
-                if hasattr(obj, w_name):
-                    try:
-                        w = getattr(obj, w_name)
-                        if callable(w):
-                            w = w()
-                        if w is None or w is False or w == 0:
-                            _weapon_debug = '%s.%s=None->False(Bare Hands)' % (label, w_name)
-                            _log_weapon_debug(_weapon_debug)
-                            return False
-
-                        if isinstance(w, (int, long)):
-                            wid = int(w)
-                            if wid <= 0:
-                                _weapon_debug = '%s.%s=%d->False(Bare Hands)' % (label, w_name, wid)
-                                _log_weapon_debug(_weapon_debug)
-                                return False
-                            if (400 <= wid <= 599) or (4000 <= wid <= 5999):
-                                _weapon_debug = '%s.%s=%d->False(Melee/Grenade)' % (label, w_name, wid)
-                                _log_weapon_debug(_weapon_debug)
-                                return False
-                            if wid > 0:
-                                _weapon_debug = '%s.%s=%d->True(Gun ID)' % (label, w_name, wid)
-                                _log_weapon_debug(_weapon_debug)
-                                return True
-
-                        if isinstance(w, (str, unicode)):
-                            w_str = str(w).lower()
-                            if any(k in w_str for k in ('fist', 'bare', 'unarm', 'hand', 'empty', 'none', 'null', 'melee', 'pan', 'crowbar', 'chicken', 'dagger', 'grenade', 'smoke', 'bomb', 'flash')):
-                                _weapon_debug = '%s.%s=%s->False(Bare/Melee)' % (label, w_name, w_str)
-                                _log_weapon_debug(_weapon_debug)
-                                return False
-                            _weapon_debug = '%s.%s=%s->True(Gun Name)' % (label, w_name, w_str)
-                            _log_weapon_debug(_weapon_debug)
-                            return True
-
-                        if w is not None:
-                            # Check bullet count (only guns hold bullets)
-                            for b_name in ('bullet_count', 'bulletCount', 'cur_bullet', 'curBullet', 'clip_bullet', 'clipBullet'):
-                                if hasattr(w, b_name):
-                                    try:
-                                        b_val = getattr(w, b_name)
-                                        if callable(b_val):
-                                            b_val = b_val()
-                                        if isinstance(b_val, (int, float)) and b_val >= 0:
-                                            _weapon_debug = '%s.%s.%s=%s->True(Has Ammo)' % (label, w_name, b_name, b_val)
-                                            _log_weapon_debug(_weapon_debug)
-                                            return True
-                                    except Exception:
-                                        pass
-
-                            # Check weapon ID attribute
-                            for id_attr in ('id', 'weapon_id', 'weaponId', 'item_id', 'itemId'):
-                                if hasattr(w, id_attr):
-                                    try:
-                                        wid_val = getattr(w, id_attr)
-                                        if callable(wid_val):
-                                            wid_val = wid_val()
-                                        if wid_val is not None:
-                                            wid_i = int(wid_val)
-                                            if wid_i <= 0:
-                                                _weapon_debug = '%s.%s.%s=%d->False(Bare Hands)' % (label, w_name, id_attr, wid_i)
-                                                _log_weapon_debug(_weapon_debug)
-                                                return False
-                                            if (400 <= wid_i <= 599) or (4000 <= wid_i <= 5999):
-                                                _weapon_debug = '%s.%s.%s=%d->False(Melee/Grenade)' % (label, w_name, id_attr, wid_i)
-                                                _log_weapon_debug(_weapon_debug)
-                                                return False
-                                            if wid_i > 0:
-                                                _weapon_debug = '%s.%s.%s=%d->True(Gun ID)' % (label, w_name, id_attr, wid_i)
-                                                _log_weapon_debug(_weapon_debug)
-                                                return True
-                                    except Exception:
-                                        pass
-
-                            # Check weapon name
-                            w_str = ''
-                            for n_attr in ('name', 'weapon_name', 'weaponName', 'desc', 'type_name'):
-                                if hasattr(w, n_attr):
-                                    try:
-                                        w_str = str(getattr(w, n_attr) or '').lower()
-                                        if w_str:
-                                            break
-                                    except Exception:
-                                        pass
-
-                            if w_str:
-                                if any(k in w_str for k in ('fist', 'bare', 'unarm', 'hand', 'empty', 'none', 'null')):
-                                    return False
-                                if any(k in w_str for k in ('pan', 'crowbar', 'chicken', 'stick', 'melee', 'knife', 'dagger', 'katana')):
-                                    return False
-                                if any(k in w_str for k in ('grenade', 'smoke', 'bomb', 'flash', 'molotov', 'throw')):
-                                    return False
-                                if any(k in w_str for k in ('rifle', 'gun', 'pistol', 'sniper', 'shotgun', 'smg', 'ak', 'm4', 'awm', 'barrett', 'firearm', 'mp5', 'ar15', 'bullet')):
-                                    return True
-                    except Exception:
-                        pass
-
-        # ===== CHECK 4: Check if firing or scoped =====
-        if _fire_held:
-            _weapon_debug = 'firing->True'
-            return True
-
-        # ===== DEFAULT: True (Holding a gun) =====
-        # When Aim Smooth is active and not detected as unarmed, allow aimlock to work smoothly
-        _weapon_debug = 'default_active->True'
-        _log_weapon_debug(_weapon_debug)
-        return True
-    except Exception as e:
-        _weapon_debug = 'exception:%s->True' % str(e)
-        _log_weapon_debug(_weapon_debug)
-        return True
-
-
-_is_gun_held = 0
-
 def is_holding_gun():
-    """
-    Exposed helper to check if avatar is currently holding a gun.
-    Returns cached _is_gun_held safely without touching native C++ objects from UIKit thread.
-    """
-    global _is_gun_held
-    return _is_gun_held
+    return 1
 
 
 def _visible(Physics, RaycastHit, camera_position, point):
-    return True
+    try:
+        direction = point - camera_position
+        distance = _finite(direction.magnitude)
+        if distance <= 0.00001:
+            return False
+        if Physics is not None and RaycastHit is not None and callable(getattr(Physics, 'RaycastWithScene', None)):
+            return not Physics.RaycastWithScene(camera_position, direction, RaycastHit(), distance)
+        return True
+    except Exception:
+        return True
 
 
 def _extract_real_name(entity, go=None):
@@ -837,134 +606,55 @@ def _tick():
         selected = None
         if _aim or _aim_smooth:
             try:
-                # Safely probe fire button across input components and character state
-                _fire_held = False
-                try:
-                    input_go = getattr(Globals, 'userInput', None)
-                    if input_go is not None:
-                        get_component = getattr(input_go, 'GetComponent', None)
-                        if callable(get_component):
-                            input_component = get_component('InputInterpred')
-                            if input_component is not None:
-                                for f_attr in ('_isFireBtnDwn', 'isFireBtnDwn', '_is_fire_btn_dwn', '_isShooting', 'isShooting', '_isFire', 'isFire'):
-                                    val = getattr(input_component, f_attr, None)
-                                    if val is not None:
-                                        try:
-                                            if callable(val):
-                                                val = val()
-                                            if bool(val):
-                                                _fire_held = True
-                                                break
-                                        except Exception:
-                                            pass
-                    if not _fire_held:
-                        for obj in (player, local_entity):
-                            if obj is None:
-                                continue
-                            for f_attr in ('is_shooting', 'isShooting', 'is_firing', 'isFiring', 'is_fire', 'isFire'):
-                                val = getattr(obj, f_attr, None)
-                                if val is not None:
-                                    try:
-                                        if callable(val):
-                                            val = val()
-                                        if bool(val):
-                                            _fire_held = True
-                                            break
-                                    except Exception:
-                                        pass
-                            if _fire_held:
-                                break
-                except Exception:
+                input_go = getattr(Globals, 'userInput', None)
+                if input_go is None:
+                    raise Waiting('Waiting for Globals.userInput')
+                get_component = getattr(input_go, 'GetComponent', None)
+                if not callable(get_component):
+                    raise Waiting('Live UserInput GameObject has no GetComponent')
+                input_component = get_component('InputInterpred')
+                if input_component is None:
+                    raise Waiting('Waiting for InputInterpred component')
+                if not hasattr(input_component, '_isFireBtnDwn'):
+                    raise Waiting('Live input has no _isFireBtnDwn')
+                _fire_held = bool(input_component._isFireBtnDwn)
+                if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
+                    _aim_state = 3
                     _fire_held = False
-
-                # 1. Aimbot 360 Lock (Button 3): needs shooting (user shoots / holds fire button to aimlock)
-                # 2. Aim Smooth (Button 10): auto locks aim to enemy when holding a firearm (auto aim without needing to shoot)
-                using_gun = _is_using_gun(player, local_entity)
-                _is_gun_held = 1 if using_gun else 0
-                should_aim = (_aim and _fire_held) or (_aim_smooth and using_gun)
-                if not should_aim:
-                    _target_id = None
-                else:
+                if _fire_held:
                     control = camera.GetComponent('PlayerCameraController')
-                    # CPlayerCameraController._onRotateCamera is an empty routine;
-                    # fail explicitly rather than claiming a lock on that backend.
                     if (control is None or not callable(getattr(control, 'onRotateCamera', None))
                             or getattr(control, 'controller', None) is not None):
                         raise Waiting('Unsupported live camera controller')
-                    # Prioritize closest enemy to player character (exclude knocked/downed)
-                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not c[10]]
-                    # When shooting, retain locked target so sprays remain consistent on the target
-                    if _fire_held and _clear_previous_target is not None:
-                        retained = [c for c in pool if c[1] == _clear_previous_target]
-                        if retained:
-                            pool = retained + [c for c in pool if c[1] != _clear_previous_target]
-
-                    # Immediate lock: Pass 1 finds closest on-screen or forward enemy
-                    selected = None
-                    for candidate in pool[:10]:
-                        if candidate[9] or candidate[0] <= 60.0:
+                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not c[10] and c[7] <= 10000.0]
+                    retained = [c for c in pool if c[1] == _clear_previous_target and c[0] <= _retain_degrees]
+                    if retained:
+                        pool = retained + [c for c in pool if c[1] != retained[0][1]]
+                    for candidate in pool[:8]:
+                        if _visible(Physics, RaycastHit, camera_position, candidate[4]):
                             selected = candidate
                             break
-                    # Pass 2: fallback to closest pool enemy
                     if selected is None and pool:
                         selected = pool[0]
-
                     if selected is not None:
-                        # Check player validity before the camera request.
-                        latest_player = getattr(Globals, 'player', None)
-                        if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
+                        latest = _fly._target()
+                        if (latest is None or latest[0] is not unit or latest[1] is not character
+                                or latest[2] != entity_id or Globals.player is not player):
                             raise Waiting('Local character changed')
-                        is_inv = getattr(selected[6].entity, 'invincible', False)
-                        if callable(is_inv):
-                            try:
-                                is_inv = is_inv()
-                            except Exception:
-                                is_inv = False
-                        is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
-                        if not _enemy(selected[6], player, service) or is_inv or selected[10]:
+                        if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False) or selected[10] or selected[7] > 10000.0:
                             selected = None
                             _target_id = None
                         else:
                             yaw, pitch = _angle_offset(selected[5], forward)
-                            if _aim_smooth and using_gun and not _fire_held:
-                                # 100% Auto Aim Smooth: quick, smooth lock and steady tracking onto target
-                                factor = 0.65
-                                max_step_yaw = 36.0
-                                max_step_pitch = 24.0
-                                smooth_yaw = max(-max_step_yaw, min(max_step_yaw, yaw * factor))
-                                smooth_pitch = max(-max_step_pitch, min(max_step_pitch, pitch * factor))
-                                if abs(yaw) <= 1.8:
-                                    smooth_yaw = yaw
-                                if abs(pitch) <= 1.4:
-                                    smooth_pitch = pitch
-                                _last_angles = (smooth_yaw, smooth_pitch)
-                                try:
-                                    control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                                except Exception:
-                                    pass
-                            elif _aim_smooth and using_gun and _fire_held:
-                                # High-speed responsive lock when shooting
-                                factor = 0.85
-                                max_step_yaw = 48.0
-                                max_step_pitch = 32.0
-                                smooth_yaw = max(-max_step_yaw, min(max_step_yaw, yaw * factor))
-                                smooth_pitch = max(-max_step_pitch, min(max_step_pitch, pitch * factor))
-                                if abs(yaw) <= 2.5:
-                                    smooth_yaw = yaw
-                                if abs(pitch) <= 1.8:
-                                    smooth_pitch = pitch
-                                _last_angles = (smooth_yaw, smooth_pitch)
-                                try:
-                                    control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-                                except Exception:
-                                    pass
-                            else:
-                                # Instant lock when Aimbot 360 Lock is used alone
-                                _last_angles = (yaw, pitch)
-                                try:
-                                    control.onRotateCamera(Vector2(yaw, pitch), True)
-                                except Exception:
-                                    pass
+                            factor = 0.65
+                            smooth_yaw = max(-36.0, min(36.0, yaw * factor))
+                            smooth_pitch = max(-24.0, min(24.0, pitch * factor))
+                            if abs(yaw) <= 1.8:
+                                smooth_yaw = yaw
+                            if abs(pitch) <= 1.4:
+                                smooth_pitch = pitch
+                            _last_angles = (smooth_yaw, smooth_pitch)
+                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
                             _aim_writes += 1
                             _aim_state = 5
                             _target_id = selected[1]

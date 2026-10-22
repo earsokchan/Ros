@@ -637,31 +637,9 @@ static id getSwitchSender(BOOL state) {
 }
 
 static void ensureESPOverlayOnTop(void) {
-    id curWin = getActiveWindow();
-    if (curWin && g_espOverlay) {
-        id espSuper = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
-        if (espSuper != curWin) {
-            ((msgSend_void_id)objc_msgSend)(curWin, sel("addSubview:"), g_espOverlay);
-        }
-        ((msgSend_void_id)objc_msgSend)(curWin, sel("bringSubviewToFront:"), g_espOverlay);
-        if (g_flyHudView) {
-            id hudSuper = ((id (*)(id, SEL))objc_msgSend)(g_flyHudView, sel("superview"));
-            if (hudSuper) ((msgSend_void_id)objc_msgSend)(hudSuper, sel("bringSubviewToFront:"), g_flyHudView);
-        }
-        if (g_aimHudView) {
-            id aimSuper = ((id (*)(id, SEL))objc_msgSend)(g_aimHudView, sel("superview"));
-            if (aimSuper) ((msgSend_void_id)objc_msgSend)(aimSuper, sel("bringSubviewToFront:"), g_aimHudView);
-        }
-        if (g_panel) {
-            id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
-            if (pSuper) ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
-        }
-        if (g_floatBtn) {
-            id fSuper = ((id (*)(id, SEL))objc_msgSend)(g_floatBtn, sel("superview"));
-            if (fSuper) ((msgSend_void_id)objc_msgSend)(fSuper, sel("bringSubviewToFront:"), g_floatBtn);
-        }
-    }
+    return;
 }
+
 
 static void triggerTweakFeature(const char *selName, const char *swKey, BOOL state) {
     @autoreleasepool {
@@ -1245,26 +1223,19 @@ static void setSwitchState(int idx, BOOL on, id onPillBg, id offPillBg, id white
 }
 
 static void updateAimSmoothHudState(void) {
-    Class defsCls = cls("NSUserDefaults");
     Class strCls = cls("NSString");
     Class uiColor = cls("UIColor");
-    if (!defsCls || !strCls || !uiColor) return;
+    if (!strCls || !uiColor) return;
 
-    static id s_keyAimSmooth = NULL;
-    if (!s_keyAimSmooth) {
-        s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-    }
-
-    BOOL aimSmoothEnabled = NO; // Safe default: off on launch until user enables
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (defs && s_keyAimSmooth) {
-        id val = ((id (*)(id, SEL, id))objc_msgSend)(defs, sel("objectForKey:"), s_keyAimSmooth);
-        if (val) {
-            aimSmoothEnabled = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyAimSmooth);
+    BOOL aimOn = NO;
+    if (g_coreBtns[3]) {
+        id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
+        const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
+        if (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3)) {
+            aimOn = YES;
         }
     }
 
-    // Menu Row 10 switch reflects the user's persisted setting (ON or OFF)
     id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
     id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.15, 0.15, 0.18, 1.0);
     id whiteColor = ((id (*)(id, SEL))objc_msgSend)((id)uiColor, sel("whiteColor"));
@@ -1272,15 +1243,15 @@ static void updateAimSmoothHudState(void) {
     id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
     id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.14, 0.14, 0.18, 1.0);
 
-    setSwitchState(10, aimSmoothEnabled, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+    setSwitchState(10, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
     // Update on-screen floating Aim Smooth HUD button state
     if (g_aimHudToggleBtn) {
-        const char *aimText = aimSmoothEnabled ? "AIM: ON" : "AIM: OFF";
-        id btnBg = aimSmoothEnabled ?
+        const char *aimText = aimOn ? "AIM: ON" : "AIM: OFF";
+        id btnBg = aimOn ?
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95) :
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
-        id brdColor = aimSmoothEnabled ?
+        id brdColor = aimOn ?
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90) :
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
 
@@ -2291,21 +2262,11 @@ static void setupMenuUI(id win, id panel) {
             }
         }
 
-        // For button 3 (Aimbot 360 Lock), cleanly remove raw FlyMenu_core targets and wire to custom toggleAimbot:
+        // For button 3 (Aimbot 360 Lock), keep FlyMenu_core's native target intact and attach toggleAimbot: for UI sync:
         if (i == 3) {
-            id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
-            if (allTargets) {
-                id enumerator = ((id (*)(id, SEL))objc_msgSend)(allTargets, sel("objectEnumerator"));
-                if (enumerator) {
-                    id t;
-                    while ((t = ((id (*)(id, SEL))objc_msgSend)(enumerator, sel("nextObject")))) {
-                        ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), t, NULL, 0x0FFFFFFF);
-                    }
-                }
-            }
-            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
             ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAimbot:"), 1 << 6);
         }
+
 
         // For button 4 (ESP), permanently remove all targets and keep hidden:
         if (i == 4) {
@@ -2355,171 +2316,34 @@ static void setupMenuUI(id win, id panel) {
 
 
 static BOOL runCombatPython(const char *cmd) {
-    if (!cmd) return NO;
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    BOOL foundCore = NO;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            foundCore = YES;
-            break;
-        }
-    }
-    if (!foundCore) return NO;
-
-    uint8_t *pCombatFailed = (uint8_t *)(coreSlide + 0xc164);
-    if (pCombatFailed && *pCombatFailed == 1) {
-        *pCombatFailed = 0;
-    }
-    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
-    if (!pCombatReady || *pCombatReady != 1) {
-        int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
-        if (ensureCombat) {
-            ensureCombat();
-        }
-    }
-    if (!pCombatReady || *pCombatReady != 1) return NO;
-
-    void **pCombatDict = (void **)(coreSlide + 0xc168);
-    if (!pCombatDict || !(*pCombatDict)) return NO;
-
-    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
-    void **pPyErrClear = (void **)(coreSlide + 0xc110);
-    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
-    void **pPyRunString = (void **)(coreSlide + 0xc138);
-
-    if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
-        !pPyGILStateRelease || !*pPyGILStateRelease ||
-        !pPyRunString || !*pPyRunString) {
-        return NO;
-    }
-
-    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
-    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
-    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
-
-    int gstate = PyGILState_Ensure();
-    void *dict = *pCombatDict;
-    BOOL ok = NO;
-    if (dict) {
-        void *res = PyRun_String(cmd, 257 /* Py_single_input */, dict, dict);
-        if (res) {
-            safePyDecref(res);
-            ok = YES;
-        }
-        if (PyErr_Clear) PyErr_Clear();
-    }
-    PyGILState_Release(gstate);
-    return ok;
+    return NO;
 }
 
 // Aimbot 360 Lock (Button 3)
 static void toggleAimbot_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
-
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
-    if (!key) return;
-
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
-
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    if (sender != g_coreBtns[3] && g_coreBtns[3]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[3], sel("sendActionsForControlEvents:"), 1 << 6);
+    }
     updateRowStates();
-
-    char pyCmd[128];
-    snprintf(pyCmd, sizeof(pyCmd), "set_aim(%s)", newState ? "True" : "False");
-    runCombatPython(pyCmd);
-
-    printf("[FlyMenuUI] Aimbot 360 Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 // Aim Smooth 100% Auto (Button 10)
 static void toggleAimSmooth_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
-
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-    if (!key) return;
-
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
-
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+    if (g_coreBtns[3]) {
+        ((msgSend_void_long)objc_msgSend)(g_coreBtns[3], sel("sendActionsForControlEvents:"), 1 << 6);
+    }
     updateRowStates();
-
-    char pyCmd[128];
-    snprintf(pyCmd, sizeof(pyCmd), "set_aim_smooth(%s)", newState ? "True" : "False");
-    runCombatPython(pyCmd);
-
-    printf("[FlyMenuUI] Aim Smooth 100%% Auto toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 static BOOL runFlyPython(const char *cmd) {
-    if (!cmd) return NO;
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    BOOL foundCore = NO;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            foundCore = YES;
-            break;
-        }
-    }
-    if (!foundCore) return NO;
-
-    void **pModuleDict = (void **)(coreSlide + 0xc0e8);
-    if (!pModuleDict || !(*pModuleDict)) return NO;
-
-    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
-    void **pPyErrClear = (void **)(coreSlide + 0xc110);
-    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
-    void **pPyRunString = (void **)(coreSlide + 0xc138);
-
-    if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
-        !pPyGILStateRelease || !*pPyGILStateRelease ||
-        !pPyRunString || !*pPyRunString) {
-        return NO;
-    }
-
-    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
-    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
-    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
-
-    int gstate = PyGILState_Ensure();
-    void *dict = *pModuleDict;
-    BOOL ok = NO;
-    if (dict) {
-        void *res = PyRun_String(cmd, 257 /* Py_single_input */, dict, dict);
-        if (res) {
-            safePyDecref(res);
-            ok = YES;
-        }
-        if (PyErr_Clear) PyErr_Clear();
-    }
-    PyGILState_Release(gstate);
-    return ok;
+    return NO;
 }
 
 // ESP Laser & Box (Button 4) - Permanently Disabled / Removed
 static void toggleEsp_imp(id self, SEL _cmd, id sender) {
     g_espActive = NO;
-    runCombatPython("set_esp(False)");
 }
+
 
 
 // Toggle Fly HUD outside on screen (Button 11)
@@ -2553,193 +2377,35 @@ static void toggleFlyHudOption_imp(id self, SEL _cmd, id sender) {
 
 // On-screen Fly HUD Actions
 static void onFlyHudToggle_imp(id self, SEL _cmd, id sender) {
-    // 1. Invoke ROSFlyTestTarget directly from FlyMenu_core
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    BOOL foundCore = NO;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            foundCore = YES;
-            break;
-        }
-    }
-    if (foundCore) {
-        id *pTarget = (id *)(coreSlide + 0xc060);
-        if (pTarget && *pTarget) {
-            ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("toggle:"), NULL);
-        }
-    }
-
     if (g_coreBtns[0]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[0], sel("sendActionsForControlEvents:"), 1 << 6);
     }
-    runFlyPython("handle('toggle', 0)");
     updateRowStates();
 }
 
 static void onFlyHudUpStart_imp(id self, SEL _cmd, id sender) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            id *pTarget = (id *)(coreSlide + 0xc060);
-            if (pTarget && *pTarget) {
-                ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("up:"), NULL);
-            }
-            break;
-        }
-    }
     if (g_coreBtns[1]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[1], sel("sendActionsForControlEvents:"), 1 << 0);
     }
-    runFlyPython("handle('lift', 1)");
 }
 
 static void onFlyHudDownStart_imp(id self, SEL _cmd, id sender) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            id *pTarget = (id *)(coreSlide + 0xc060);
-            if (pTarget && *pTarget) {
-                ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("down:"), NULL);
-            }
-            break;
-        }
-    }
     if (g_coreBtns[2]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[2], sel("sendActionsForControlEvents:"), 1 << 0);
     }
-    runFlyPython("handle('lift', -1)");
 }
 
 static void onFlyHudLiftStop_imp(id self, SEL _cmd, id sender) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            id *pTarget = (id *)(coreSlide + 0xc060);
-            if (pTarget && *pTarget) {
-                ((void (*)(id, SEL, id))objc_msgSend)(*pTarget, sel("release:"), NULL);
-            }
-            break;
-        }
-    }
     if (g_coreBtns[1]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[1], sel("sendActionsForControlEvents:"), 1 << 6);
     }
     if (g_coreBtns[2]) {
         ((msgSend_void_long)objc_msgSend)(g_coreBtns[2], sel("sendActionsForControlEvents:"), 1 << 6);
     }
-    runFlyPython("handle('lift', 0)");
 }
 
-// Extract rich ESP snapshot string safely from FlyMenu_core's validated Python session
 static char *getESPSnapshot(void) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    BOOL foundCore = NO;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            foundCore = YES;
-            break;
-        }
-    }
-    if (!foundCore) return NULL;
-
-    // Check if FlyMenu_core's combat engine has successfully initialized and is ready
-    uint8_t *pCombatFailed = (uint8_t *)(coreSlide + 0xc164);
-    if (pCombatFailed && *pCombatFailed == 1) {
-        *pCombatFailed = 0;
-    }
-    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
-    if (!pCombatReady || *pCombatReady != 1) {
-        static int s_attemptInit = 0;
-        if (++s_attemptInit % 10 == 1) {
-            int (*ensureCombat)(void) = (int (*)(void))(coreSlide + 0x3690);
-            if (ensureCombat) {
-                ensureCombat();
-            }
-        }
-        if (!pCombatReady || *pCombatReady != 1) {
-            return NULL;
-        }
-    }
-
-    void **pCombatDict = (void **)(coreSlide + 0xc168);
-    if (!pCombatDict || !(*pCombatDict)) return NULL;
-
-    // Validated BSS pointers from FlyMenu_core.dylib:
-    // 0xc0f0: _gil (PyGILState_Ensure)
-    // 0xc110: _clearError (PyErr_Clear)
-    // 0xc118: _releaseGil (PyGILState_Release)
-    // 0xc138: _runString (PyRun_String)
-    // 0xc150: _stringData (PyString_AsString)
-    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
-    void **pPyErrClear = (void **)(coreSlide + 0xc110);
-    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
-    void **pPyRunString = (void **)(coreSlide + 0xc138);
-    void **pPyStringAsString = (void **)(coreSlide + 0xc150);
-
-    if (!pPyGILStateEnsure || !*pPyGILStateEnsure ||
-        !pPyGILStateRelease || !*pPyGILStateRelease ||
-        !pPyRunString || !*pPyRunString ||
-        !pPyStringAsString || !*pPyStringAsString) {
-        return NULL;
-    }
-
-    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
-    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
-    char *(*PyString_AsString)(void *) = (char *(*)(void *))*pPyStringAsString;
-    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
-
-    int gstate = PyGILState_Ensure();
-    char *resultCopy = NULL;
-    void *dict = *pCombatDict;
-
-    if (dict) {
-        // 1. First try rich esp_snapshot() (Py_eval_input = 258)
-        void *res = PyRun_String("esp_snapshot()", 258 /* Py_eval_input */, dict, dict);
-        if (res) {
-            char *s = PyString_AsString(res);
-            if (s && *s && strcmp(s, "NONE") != 0) {
-                resultCopy = strdup(s);
-            }
-            safePyDecref(res);
-        }
-        if (PyErr_Clear) {
-            PyErr_Clear();
-        }
-
-        // 2. Fallback to standard snapshot() if esp_snapshot was empty or "NONE"
-        if (!resultCopy) {
-            void *res2 = PyRun_String("snapshot()", 258 /* Py_eval_input */, dict, dict);
-            if (res2) {
-                char *s2 = PyString_AsString(res2);
-                if (s2 && *s2 && strcmp(s2, "NONE") != 0) {
-                    resultCopy = strdup(s2);
-                }
-                safePyDecref(res2);
-            }
-            if (PyErr_Clear) {
-                PyErr_Clear();
-            }
-        }
-    }
-
-    PyGILState_Release(gstate);
-    return resultCopy;
+    return NULL;
 }
 
 static void ensureESPOverlay(id win) {
