@@ -77,6 +77,7 @@ static id g_tabLabels[4] = { NULL };            // Clean tab text labels
 static int g_selectedTab = -1;                  // -1 = Show All
 
 static void updateRowStates(void);
+static void syncCombatConfigToDisk(void);
 
 // Rich ESP Overlay Globals
 static id g_espOverlay = NULL;
@@ -89,7 +90,7 @@ static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
 static BOOL g_espActive = NO;
 static id g_infoModal = NULL;
 
-// On-screen Floating Fly HUD Globals
+// On-screen Floating Fly HUD Globalsnow 
 static id g_flyHudView = NULL;
 static id g_flyHudToggleBtn = NULL;
 static id g_flyHudUpBtn = NULL;
@@ -1223,17 +1224,20 @@ static void setSwitchState(int idx, BOOL on, id onPillBg, id offPillBg, id white
 }
 
 static void updateAimSmoothHudState(void) {
+    Class defsCls = cls("NSUserDefaults");
     Class strCls = cls("NSString");
     Class uiColor = cls("UIColor");
-    if (!strCls || !uiColor) return;
+    if (!defsCls || !strCls || !uiColor) return;
 
-    BOOL aimOn = NO;
-    if (g_coreBtns[3]) {
-        id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
-        const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-        if (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3)) {
-            aimOn = YES;
-        }
+    static id s_keyAimSmooth = NULL;
+    if (!s_keyAimSmooth) {
+        s_keyAimSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+    }
+
+    BOOL aimSmoothOn = NO;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (defs && s_keyAimSmooth) {
+        aimSmoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyAimSmooth);
     }
 
     id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
@@ -1243,15 +1247,15 @@ static void updateAimSmoothHudState(void) {
     id activeBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
     id normalBorder = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.14, 0.14, 0.18, 1.0);
 
-    setSwitchState(10, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+    setSwitchState(10, aimSmoothOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
     // Update on-screen floating Aim Smooth HUD button state
     if (g_aimHudToggleBtn) {
-        const char *aimText = aimOn ? "AIM: ON" : "AIM: OFF";
-        id btnBg = aimOn ?
+        const char *aimText = aimSmoothOn ? "AIM: ON" : "AIM: OFF";
+        id btnBg = aimSmoothOn ?
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95) :
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
-        id brdColor = aimOn ?
+        id brdColor = aimSmoothOn ?
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90) :
             ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
 
@@ -1341,13 +1345,6 @@ static void updateRowStates(void) {
             id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
             if (defs) {
                 aimOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keySwAim);
-            }
-        }
-        if (!aimOn && g_coreBtns[3]) {
-            id t = ((msgSend_id_long)objc_msgSend)(g_coreBtns[3], sel("titleForState:"), 0);
-            const char *s = t ? (const char *)((id (*)(id, SEL))objc_msgSend)(t, sel("UTF8String")) : "";
-            if (strstr(s, ":ON") != NULL || strstr(s, ":LOCK") != NULL || strstr(s, ":WAIT") != NULL || strstr(s, ":PAUSED") != NULL || (strstr(s, "AIM") != NULL && strstr(s, "OFF") == NULL && strlen(s) > 3)) {
-                aimOn = YES;
             }
         }
         setSwitchState(3, aimOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
@@ -1851,6 +1848,8 @@ static void setupMenuUI(id win, id panel) {
         }
     }
 
+    syncCombatConfigToDisk();
+
     // 2. Identify the 6 native core buttons from FlyMenu_core.dylib
     id subviews = ((id (*)(id, SEL))objc_msgSend)(panel, sel("subviews"));
     if (subviews) {
@@ -2262,8 +2261,19 @@ static void setupMenuUI(id win, id panel) {
             }
         }
 
-        // For button 3 (Aimbot 360 Lock), keep FlyMenu_core's native target intact and attach toggleAimbot: for UI sync:
+        // For button 3 (Aimbot 360 Lock), cleanly remove raw FlyMenu_core targets and wire exclusively to toggleAimbot:
         if (i == 3) {
+            id allTargets = ((id (*)(id, SEL))objc_msgSend)(btn, sel("allTargets"));
+            if (allTargets) {
+                id enumerator = ((id (*)(id, SEL))objc_msgSend)(allTargets, sel("objectEnumerator"));
+                if (enumerator) {
+                    id t;
+                    while ((t = ((id (*)(id, SEL))objc_msgSend)(enumerator, sel("nextObject")))) {
+                        ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), t, NULL, 0x0FFFFFFF);
+                    }
+                }
+            }
+            ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("removeTarget:action:forControlEvents:"), NULL, NULL, 0x0FFFFFFF);
             ((void (*)(id, SEL, id, SEL, unsigned long))objc_msgSend)(btn, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAimbot:"), 1 << 6);
         }
 
@@ -2315,24 +2325,88 @@ static void setupMenuUI(id win, id panel) {
 
 
 
-static BOOL runCombatPython(const char *cmd) {
-    return NO;
+static void syncCombatConfigToDisk(void) {
+    Class defsCls = cls("NSUserDefaults");
+    Class strCls = cls("NSString");
+    if (!defsCls || !strCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    id kAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+    id kSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+
+    BOOL aimOn = NO;
+    BOOL smoothOn = NO;
+    if (kAim) aimOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
+    if (kSmooth) smoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kSmooth);
+
+    char cfgBuf[256];
+    snprintf(cfgBuf, sizeof(cfgBuf), "aim=%d\naimsmooth=%d\n", aimOn ? 1 : 0, smoothOn ? 1 : 0);
+
+    FILE *f1 = fopen("/tmp/ros_combat.cfg", "w");
+    if (f1) {
+        fputs(cfgBuf, f1);
+        fclose(f1);
+    }
+
+    id docPathObj = getDocumentsPath("ros_combat.cfg");
+    if (docPathObj) {
+        const char *cDocPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
+        if (cDocPath) {
+            FILE *f2 = fopen(cDocPath, "w");
+            if (f2) {
+                fputs(cfgBuf, f2);
+                fclose(f2);
+            }
+        }
+    }
 }
 
 // Aimbot 360 Lock (Button 3)
 static void toggleAimbot_imp(id self, SEL _cmd, id sender) {
-    if (sender != g_coreBtns[3] && g_coreBtns[3]) {
-        ((msgSend_void_long)objc_msgSend)(g_coreBtns[3], sel("sendActionsForControlEvents:"), 1 << 6);
-    }
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    syncCombatConfigToDisk();
     updateRowStates();
+
+    printf("[FlyMenuUI] Aimbot 360 Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 // Aim Smooth 100% Auto (Button 10)
 static void toggleAimSmooth_imp(id self, SEL _cmd, id sender) {
-    if (g_coreBtns[3]) {
-        ((msgSend_void_long)objc_msgSend)(g_coreBtns[3], sel("sendActionsForControlEvents:"), 1 << 6);
-    }
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    syncCombatConfigToDisk();
     updateRowStates();
+    updateAimSmoothHudState();
+
+    printf("[FlyMenuUI] Aim Smooth toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 static BOOL runFlyPython(const char *cmd) {
@@ -2689,6 +2763,7 @@ static void initFlyMenuUI(void) {
 
         ensureAndGetScriptPath("ros_fly.py", EMBEDDED_ROS_FLY_PY, EMBEDDED_ROS_FLY_PY_LEN);
         ensureAndGetScriptPath("ros_combat.py", EMBEDDED_ROS_COMBAT_PY, EMBEDDED_ROS_COMBAT_PY_LEN);
+        syncCombatConfigToDisk();
 
         Class nsTimer = cls("NSTimer");
         Class nsRunLoop = cls("NSRunLoop");

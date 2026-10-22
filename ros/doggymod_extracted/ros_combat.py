@@ -296,6 +296,87 @@ def _clear_frame():
 _scene_fingerprint = None
 _scene_change_time = 0.0
 
+_auto_fire_tick = 0
+
+def _trigger_auto_shoot(player, local_entity):
+    global _auto_fire_tick
+    _auto_fire_tick += 1
+    try:
+        input_go = getattr(Globals, 'userInput', None)
+        if input_go is not None and hasattr(input_go, 'GetComponent'):
+            ic = input_go.GetComponent('InputInterpred')
+            if ic is not None:
+                fire_state = True if (_auto_fire_tick % 3 != 0) else False
+                if hasattr(ic, '_isFireBtnDwn'):
+                    try:
+                        ic._isFireBtnDwn = fire_state
+                    except Exception:
+                        pass
+                for m_name in ('onFireBtnDown', 'OnFireBtnDown', 'onFire', 'fire'):
+                    fn = getattr(ic, m_name, None)
+                    if callable(fn):
+                        try:
+                            fn(fire_state)
+                        except Exception:
+                            try:
+                                if fire_state: fn()
+                            except Exception:
+                                pass
+                        break
+    except Exception:
+        pass
+
+
+def _release_auto_shoot():
+    try:
+        input_go = getattr(Globals, 'userInput', None)
+        if input_go is not None and hasattr(input_go, 'GetComponent'):
+            ic = input_go.GetComponent('InputInterpred')
+            if ic is not None:
+                if hasattr(ic, '_isFireBtnDwn'):
+                    try:
+                        if getattr(ic, '_isFireBtnDwn', False):
+                            ic._isFireBtnDwn = False
+                    except Exception:
+                        pass
+                for m_name in ('onFireBtnUp', 'OnFireBtnUp', 'onFireRelease', 'releaseFire'):
+                    fn = getattr(ic, m_name, None)
+                    if callable(fn):
+                        try:
+                            fn()
+                        except Exception:
+                            pass
+                        break
+    except Exception:
+        pass
+
+
+_last_cfg_sync = 0.0
+
+def _sync_config():
+    global _aim, _aim_smooth, _aim_state, _last_cfg_sync
+    now = time.time()
+    if now - _last_cfg_sync < 0.10:
+        return
+    _last_cfg_sync = now
+    paths = (
+        '/tmp/ros_combat.cfg',
+        os.path.join(os.environ.get('HOME', '/var/mobile'), 'Documents', 'ros_combat.cfg')
+    )
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r') as f:
+                    txt = f.read()
+                if 'aim=' in txt:
+                    _aim = ('aim=1' in txt)
+                if 'aimsmooth=' in txt:
+                    _aim_smooth = ('aimsmooth=1' in txt)
+                _aim_state = 1 if (_aim or _aim_smooth) else 0
+                return
+            except Exception:
+                pass
+
 
 def _ensure_timer():
     global _timer, _last_tick, Timer
@@ -410,9 +491,10 @@ def _tick():
     _last_tick = now
     _ticks += 1
     try:
+        _sync_config()
         if not (_esp or _aim or _aim_smooth):
             _clear_frame()
-            _stop_timer()
+            _release_auto_shoot()
             _is_gun_held = 0
             return
         _clear_previous_target = _target_id
@@ -621,12 +703,20 @@ def _tick():
                 if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
                     _aim_state = 3
                     _fire_held = False
-                if _fire_held:
+                should_aim = (_aim and _fire_held) or _aim_smooth
+                if should_aim:
                     control = camera.GetComponent('PlayerCameraController')
                     if (control is None or not callable(getattr(control, 'onRotateCamera', None))
                             or getattr(control, 'controller', None) is not None):
                         raise Waiting('Unsupported live camera controller')
-                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not c[10] and c[7] <= 10000.0]
+
+                    if _aim_smooth:
+                        # Aim Smooth: 100m distance limit (100^2 = 10000.0) & ignore knocked down enemies (not c[10])
+                        pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not c[10] and c[7] <= 10000.0]
+                    else:
+                        # Aimbot 360 Lock: full 360 degrees, all distances, ignore invincible enemies
+                        pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
+
                     retained = [c for c in pool if c[1] == _clear_previous_target and c[0] <= _retain_degrees]
                     if retained:
                         pool = retained + [c for c in pool if c[1] != retained[0][1]]
@@ -641,38 +731,60 @@ def _tick():
                         if (latest is None or latest[0] is not unit or latest[1] is not character
                                 or latest[2] != entity_id or Globals.player is not player):
                             raise Waiting('Local character changed')
-                        if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False) or selected[10] or selected[7] > 10000.0:
+                        if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False) or (_aim_smooth and (selected[10] or selected[7] > 10000.0)):
                             selected = None
                             _target_id = None
+                            _release_auto_shoot()
                         else:
                             yaw, pitch = _angle_offset(selected[5], forward)
-                            factor = 0.65
-                            smooth_yaw = max(-36.0, min(36.0, yaw * factor))
-                            smooth_pitch = max(-24.0, min(24.0, pitch * factor))
-                            if abs(yaw) <= 1.8:
-                                smooth_yaw = yaw
-                            if abs(pitch) <= 1.4:
-                                smooth_pitch = pitch
-                            _last_angles = (smooth_yaw, smooth_pitch)
-                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                            if _aim_smooth:
+                                factor = 0.65
+                                smooth_yaw = max(-36.0, min(36.0, yaw * factor))
+                                smooth_pitch = max(-24.0, min(24.0, pitch * factor))
+                                if abs(yaw) <= 1.8:
+                                    smooth_yaw = yaw
+                                if abs(pitch) <= 1.4:
+                                    smooth_pitch = pitch
+                                _last_angles = (smooth_yaw, smooth_pitch)
+                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+
+                                # Auto shoot when crosshair is aligned on enemy within tolerance
+                                if abs(yaw) <= 6.0 and abs(pitch) <= 5.0:
+                                    _trigger_auto_shoot(player, local_entity)
+                                else:
+                                    _release_auto_shoot()
+                            else:
+                                # Aimbot 360 Lock: direct instant snap
+                                _last_angles = (yaw, pitch)
+                                control.onRotateCamera(Vector2(yaw, pitch), True)
+                                _release_auto_shoot()
+
                             _aim_writes += 1
                             _aim_state = 5
                             _target_id = selected[1]
+                    else:
+                        _release_auto_shoot()
+                else:
+                    _release_auto_shoot()
             except Waiting as aim_wait:
                 _waiting = str(aim_wait)
                 _target_id = None
+                _release_auto_shoot()
                 _aim_state = 2 if (_aim or _aim_smooth) else 0
             except Exception as aim_err:
                 _last_error = 'Aim process: %s: %s' % (type(aim_err).__name__, aim_err)
                 _target_id = None
+                _release_auto_shoot()
                 _aim_state = 2 if (_aim or _aim_smooth) else 0
     except Waiting as error:
         _waiting = str(error)
         _target_id = None
+        _release_auto_shoot()
         _aim_state = 2 if (_aim or _aim_smooth) else 0
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         _target_id = None
+        _release_auto_shoot()
         _aim_state = 2 if (_aim or _aim_smooth) else 0
         _esp_state = 2 if _esp else 0
 
@@ -732,3 +844,7 @@ def diagnostics():
 
 
 print('[ROS Combat] %s ready; ESP/Aim disabled by default' % BUILD)
+try:
+    _ensure_timer()
+except Exception:
+    pass
