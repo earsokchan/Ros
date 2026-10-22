@@ -8,7 +8,23 @@ import os
 BUILD = 'ROS-COMBAT-TEST-10'
 
 def _write_esp_file(content):
-    pass
+    # Crash-safe file IPC to the menu overlay. Atomic replace so the reader
+    # never sees a partially written frame.
+    try:
+        path = '/tmp/ros_esp.dat'
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            f.write(content if content else 'NONE')
+        try:
+            os.replace(tmp, path)
+        except Exception:
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            os.rename(tmp, path)
+    except Exception:
+        pass
 
 _fly = sys.modules.get('ros_fly_mod')
 if _fly is None:
@@ -48,6 +64,12 @@ if Timer is None:
 _esp = False
 _aim = False
 _aim_smooth = False
+_autoscope = False
+_autoscope_zoom = 35.0
+_autoscope_applied = False
+_autoscope_native_fov = None
+_autoscope_until = 0.0
+_autoscope_fire_prev = False
 _esp_state = 0
 _aim_state = 0
 _timer = None
@@ -67,6 +89,7 @@ _capture_degrees = 180.0
 _retain_degrees = 180.0
 _max_lines = 64
 _last_angles = (0.0, 0.0)
+_weapon_debug = ''
 
 
 class Waiting(Exception):
@@ -354,7 +377,8 @@ def _release_auto_shoot():
 _last_cfg_sync = 0.0
 
 def _sync_config():
-    global _aim, _aim_smooth, _aim_state, _last_cfg_sync
+    global _aim, _aim_smooth, _aim_state, _last_cfg_sync, _autoscope, _autoscope_zoom
+    global _esp, _esp_state
     now = time.time()
     if now - _last_cfg_sync < 0.10:
         return
@@ -372,7 +396,20 @@ def _sync_config():
                     _aim = ('aim=1' in txt)
                 if 'aimsmooth=' in txt:
                     _aim_smooth = ('aimsmooth=1' in txt)
+                if 'autoscope=' in txt:
+                    _autoscope = ('autoscope=1' in txt)
+                if 'esp=' in txt:
+                    _esp = ('esp=1' in txt)
+                for line in txt.splitlines():
+                    if line.startswith('autoscope_range='):
+                        try:
+                            _autoscope_zoom = float(line.split('=', 1)[1].strip())
+                        except Exception:
+                            pass
                 _aim_state = 1 if (_aim or _aim_smooth) else 0
+                _esp_state = 1 if _esp else 0
+                if _esp or _aim or _aim_smooth or _autoscope:
+                    _ensure_timer()
                 return
             except Exception:
                 pass
@@ -401,13 +438,101 @@ def _stop_timer():
             pass
 
 
+def _fire_signal(input_component):
+    # Returns True if a shot/fire appears active. Covers short taps that may
+    # set a transient flag between ticks.
+    try:
+        if bool(getattr(input_component, '_isFireBtnDwn', False)):
+            return True
+    except Exception:
+        pass
+    for attr in ('_isFireBtn', '_fireBtnDwn', '_isFiring', '_isShoot', 'isFire', 'isShoot'):
+        try:
+            if getattr(input_component, attr, False):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _find_camera_controller(camera):
+    try:
+        get_component = getattr(camera, 'GetComponent', None)
+        if callable(get_component):
+            for name in ('PlayerCameraController', 'CameraController', 'PlayerCamera'):
+                try:
+                    control = get_component(name)
+                except Exception:
+                    control = None
+                if control is not None:
+                    return control
+    except Exception:
+        pass
+    return None
+
+
+def _set_camera_fov(camera, controller, value):
+    # Best-effort FOV/zoom. Tries Unity Camera.fieldOfView first, then common
+    # controller fields. Every attempt is guarded so a missing API never raises.
+    try:
+        if camera is not None and hasattr(camera, 'fieldOfView'):
+            camera.fieldOfView = float(value)
+            return True
+    except Exception:
+        pass
+    if controller is None:
+        return False
+    for attr in ('fieldOfView', '_fieldOfView', 'fov', '_fov', 'Fov', 'defaultFov', 'currentFov'):
+        try:
+            if hasattr(controller, attr):
+                setattr(controller, attr, float(value))
+                return True
+        except Exception:
+            pass
+    for attr in ('SetFov', 'SetFOV', 'setFov', 'SetFieldOfView'):
+        fn = getattr(controller, attr, None)
+        if callable(fn):
+            try:
+                fn(float(value))
+                return True
+            except Exception:
+                pass
+    return False
+
+
+def _restore_native_fov(camera, controller):
+    global _autoscope_native_fov
+    if _autoscope_native_fov is not None:
+        _set_camera_fov(camera, controller, _autoscope_native_fov)
+
+
+def _apply_autoscope(camera, controller, engage):
+    global _autoscope_applied, _autoscope_native_fov
+    try:
+        if engage:
+            if not _autoscope_applied:
+                if camera is not None and hasattr(camera, 'fieldOfView'):
+                    try:
+                        _autoscope_native_fov = float(camera.fieldOfView)
+                    except Exception:
+                        _autoscope_native_fov = None
+                _autoscope_applied = _set_camera_fov(camera, controller, _autoscope_zoom)
+        else:
+            if _autoscope_applied:
+                _restore_native_fov(camera, controller)
+            _autoscope_applied = False
+    except Exception:
+        _autoscope_applied = False
+
+
 def handle(action):
     global _esp, _aim, _aim_smooth, _esp_state, _aim_state, _last_error, _target_id
     try:
         if action == 'esp':
-            _esp = False
-            _esp_state = 0
-            _write_esp_file('')
+            _esp = not _esp
+            _esp_state = 1 if _esp else 0
+            if not _esp:
+                _write_esp_file('')
         elif action == 'aim':
             _aim = not _aim
             _aim_state = 1 if _aim else 0
@@ -418,13 +543,15 @@ def handle(action):
             _aim_smooth = not _aim_smooth
             if not _aim and not _aim_smooth and not _esp:
                 _clear_frame()
+        elif action == 'autoscope':
+            _autoscope = not _autoscope
         elif action == 'off':
             # Do NOT reset _aim, _aim_smooth, or _esp on background tap / menu close!
             pass
         else:
             raise ValueError('Unknown combat request')
         _last_error = ''
-        if _esp or _aim or _aim_smooth:
+        if _esp or _aim or _aim_smooth or _autoscope:
             _ensure_timer()
         else:
             _stop_timer()
@@ -456,10 +583,13 @@ def set_aim(val):
 def set_esp(val):
     global _esp, _esp_state, _last_error
     try:
-        _esp = False
-        _esp_state = 0
-        _write_esp_file('')
-        return False
+        _esp = bool(val)
+        _esp_state = 1 if _esp else 0
+        if _esp:
+            _ensure_timer()
+        else:
+            _write_esp_file('')
+        return True
     except Exception as error:
         _last_error = '%s: %s' % (type(error).__name__, error)
         return False
@@ -470,7 +600,7 @@ def set_aim_smooth(val):
     global _aim_smooth, _last_error
     try:
         _aim_smooth = bool(val)
-        if _aim_smooth or _esp or _aim:
+        if _aim_smooth or _esp or _aim or _autoscope:
             _ensure_timer()
         else:
             _stop_timer()
@@ -481,18 +611,34 @@ def set_aim_smooth(val):
         return False
 
 
+def set_autoscope(val):
+    global _autoscope, _last_error
+    try:
+        _autoscope = bool(val)
+        if _autoscope:
+            _ensure_timer()
+        elif not (_esp or _aim or _aim_smooth):
+            _stop_timer()
+            _clear_frame()
+        return _autoscope
+    except Exception as error:
+        _last_error = '%s: %s' % (type(error).__name__, error)
+        return False
+
+
 def _tick():
     global _last_tick, _owner, _target_id, _frame, _rich_esp_frame, _frame_time
     global _esp_state, _aim_state, _last_error, _last_skip, _waiting, _ticks, _scanned, _skipped
     global _fire_held, _aim_writes, _last_angles, _esp, _aim, _aim_smooth, _last_esp_str
-    global _scene_fingerprint, _scene_change_time, _is_gun_held
+    global _scene_fingerprint, _scene_change_time, _is_gun_held, _autoscope
+    global _autoscope_until, _autoscope_fire_prev
     now = time.time()
     previous_tick = _last_tick
     _last_tick = now
     _ticks += 1
     try:
         _sync_config()
-        if not (_esp or _aim or _aim_smooth):
+        if not (_esp or _aim or _aim_smooth or _autoscope):
             _clear_frame()
             _release_auto_shoot()
             _is_gun_held = 0
@@ -685,97 +831,107 @@ def _tick():
             _write_esp_file('')
         _frame_time = now
 
+        # Auto Scope: zoom the camera in on close-range fire, restore otherwise.
+        if _autoscope:
+            try:
+                fire_now = False
+                input_go = getattr(Globals, 'userInput', None)
+                input_component = None
+                if input_go is not None and hasattr(input_go, 'GetComponent'):
+                    input_component = input_go.GetComponent('InputInterpred')
+                if input_component is not None:
+                    fire_now = _fire_signal(input_component)
+                # Latch on a fire edge (covers short taps), and hold briefly so a
+                # brief click still visibly scopes in.
+                if fire_now and not _autoscope_fire_prev:
+                    has_close = False
+                    for c in candidates:
+                        if c[7] <= 5625.0:
+                            has_close = True
+                            break
+                    if has_close:
+                        _autoscope_until = now + 0.7
+                _autoscope_fire_prev = fire_now
+                engaged = fire_now or (now < _autoscope_until)
+                controller = _find_camera_controller(camera)
+                _apply_autoscope(camera, controller, engaged)
+            except Exception as scope_err:
+                _last_error = 'AutoScope: %s: %s' % (type(scope_err).__name__, scope_err)
+        elif _autoscope_applied:
+            _apply_autoscope(camera, _find_camera_controller(camera), False)
+
         selected = None
         if _aim or _aim_smooth:
-            try:
-                input_go = getattr(Globals, 'userInput', None)
-                if input_go is None:
-                    raise Waiting('Waiting for Globals.userInput')
-                get_component = getattr(input_go, 'GetComponent', None)
-                if not callable(get_component):
-                    raise Waiting('Live UserInput GameObject has no GetComponent')
-                input_component = get_component('InputInterpred')
-                if input_component is None:
-                    raise Waiting('Waiting for InputInterpred component')
-                if not hasattr(input_component, '_isFireBtnDwn'):
-                    raise Waiting('Live input has no _isFireBtnDwn')
-                _fire_held = bool(input_component._isFireBtnDwn)
-                if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
-                    _aim_state = 3
-                    _fire_held = False
-                should_aim = (_aim and _fire_held) or _aim_smooth
-                if should_aim:
-                    control = camera.GetComponent('PlayerCameraController')
-                    if (control is None or not callable(getattr(control, 'onRotateCamera', None))
-                            or getattr(control, 'controller', None) is not None):
-                        raise Waiting('Unsupported live camera controller')
-
-                    if _aim_smooth:
-                        # Aim Smooth: 100m distance limit (100^2 = 10000.0) & ignore knocked down enemies (not c[10])
-                        pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not c[10] and c[7] <= 10000.0]
+            input_go = getattr(Globals, 'userInput', None)
+            if input_go is None:
+                raise Waiting('Waiting for Globals.userInput')
+            get_component = getattr(input_go, 'GetComponent', None)
+            if not callable(get_component):
+                raise Waiting('Live UserInput GameObject has no GetComponent')
+            input_component = get_component('InputInterpred')
+            if input_component is None:
+                raise Waiting('Waiting for InputInterpred component')
+            if not hasattr(input_component, '_isFireBtnDwn'):
+                raise Waiting('Live input has no _isFireBtnDwn')
+            _fire_held = bool(input_component._isFireBtnDwn)
+            if not getattr(input_component, '_inputEnable', False) or not getattr(input_component, '_canRotateCamera', False):
+                _aim_state = 3
+                _fire_held = False
+            # Aim Smooth auto-aims 100% of the time without requiring fire button!
+            should_aim = _aim_smooth or _fire_held
+            if not should_aim:
+                _target_id = None
+            else:
+                control = camera.GetComponent('PlayerCameraController')
+                # CPlayerCameraController._onRotateCamera is an empty routine;
+                # fail explicitly rather than claiming a lock on that backend.
+                if (control is None or not callable(getattr(control, 'onRotateCamera', None))
+                        or getattr(control, 'controller', None) is not None):
+                    raise Waiting('Unsupported live camera controller')
+                # Prioritize closest enemy to player character (20m before 100m)
+                pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
+                retained = [c for c in candidates if c[1] == _clear_previous_target
+                            and c[0] <= _retain_degrees and not c[8]]
+                if retained:
+                    # If another enemy is much closer than the retained target, switch to the closer threat
+                    if pool and pool[0][7] < retained[0][7] * 0.5:
+                        pass
                     else:
-                        # Aimbot 360 Lock: full 360 degrees, all distances, ignore invincible enemies
-                        pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8]]
-
-                    retained = [c for c in pool if c[1] == _clear_previous_target and c[0] <= _retain_degrees]
-                    if retained:
                         pool = retained + [c for c in pool if c[1] != retained[0][1]]
-                    for candidate in pool[:8]:
-                        if _visible(Physics, RaycastHit, camera_position, candidate[4]):
-                            selected = candidate
-                            break
-                    if selected is None and pool:
-                        selected = pool[0]
-                    if selected is not None:
-                        latest = _fly._target()
-                        if (latest is None or latest[0] is not unit or latest[1] is not character
-                                or latest[2] != entity_id or Globals.player is not player):
-                            raise Waiting('Local character changed')
-                        if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False) or (_aim_smooth and (selected[10] or selected[7] > 10000.0)):
-                            selected = None
-                            _target_id = None
-                            _release_auto_shoot()
-                        else:
-                            yaw, pitch = _angle_offset(selected[5], forward)
-                            if _aim_smooth:
-                                factor = 0.65
-                                smooth_yaw = max(-36.0, min(36.0, yaw * factor))
-                                smooth_pitch = max(-24.0, min(24.0, pitch * factor))
-                                if abs(yaw) <= 1.8:
-                                    smooth_yaw = yaw
-                                if abs(pitch) <= 1.4:
-                                    smooth_pitch = pitch
-                                _last_angles = (smooth_yaw, smooth_pitch)
-                                control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
-
-                                # Auto shoot when crosshair is aligned on enemy within tolerance
-                                if abs(yaw) <= 6.0 and abs(pitch) <= 5.0:
-                                    _trigger_auto_shoot(player, local_entity)
-                                else:
-                                    _release_auto_shoot()
-                            else:
-                                # Aimbot 360 Lock: direct instant snap
-                                _last_angles = (yaw, pitch)
-                                control.onRotateCamera(Vector2(yaw, pitch), True)
-                                _release_auto_shoot()
-
-                            _aim_writes += 1
-                            _aim_state = 5
-                            _target_id = selected[1]
+                # Visibility is recomputed while firing/aiming; pick closest visible enemy
+                for candidate in pool[:12]:
+                    if _visible(Physics, RaycastHit, camera_position, candidate[4]):
+                        selected = candidate
+                        break
+                if selected is not None:
+                    # Check player validity before the camera request.
+                    latest_player = getattr(Globals, 'player', None)
+                    if latest_player is None or latest_player is not player or getattr(latest_player, 'entity', None) is None:
+                        raise Waiting('Local character changed')
+                    if not _enemy(selected[6], player, service) or getattr(selected[6].entity, 'invincible', False):
+                        selected = None
+                        _target_id = None
                     else:
-                        _release_auto_shoot()
-                else:
-                    _release_auto_shoot()
-            except Waiting as aim_wait:
-                _waiting = str(aim_wait)
-                _target_id = None
-                _release_auto_shoot()
-                _aim_state = 2 if (_aim or _aim_smooth) else 0
-            except Exception as aim_err:
-                _last_error = 'Aim process: %s: %s' % (type(aim_err).__name__, aim_err)
-                _target_id = None
-                _release_auto_shoot()
-                _aim_state = 2 if (_aim or _aim_smooth) else 0
+                        yaw, pitch = _angle_offset(selected[5], forward)
+                        if _aim_smooth and not _fire_held:
+                            # 100% Auto Aim Smooth: glide crosshair smoothly towards target without clicking shoot
+                            smooth_yaw = max(-14.0, min(14.0, yaw * 0.32))
+                            smooth_pitch = max(-9.0, min(9.0, pitch * 0.32))
+                            _last_angles = (smooth_yaw, smooth_pitch)
+                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                        elif _aim_smooth and _fire_held:
+                            # User clicked shoot: higher tracking response
+                            smooth_yaw = max(-24.0, min(24.0, yaw * 0.60))
+                            smooth_pitch = max(-16.0, min(16.0, pitch * 0.60))
+                            _last_angles = (smooth_yaw, smooth_pitch)
+                            control.onRotateCamera(Vector2(smooth_yaw, smooth_pitch), True)
+                        else:
+                            # Instant lock when Aimbot 360 Lock is used alone
+                            _last_angles = (yaw, pitch)
+                            control.onRotateCamera(Vector2(yaw, pitch), True)
+                        _aim_writes += 1
+                        _aim_state = 5
+                        _target_id = selected[1]
     except Waiting as error:
         _waiting = str(error)
         _target_id = None
