@@ -1264,11 +1264,6 @@ static void updateAimSmoothHudState(void) {
         }
     }
 
-    int gunHolding = 0;
-    if (aimSmoothEnabled) {
-        gunHolding = checkPlayerHoldingGun();
-    }
-
     // Menu Row 10 switch reflects the user's persisted setting (ON or OFF)
     id onPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.83, 0.11, 0.11, 1.0);
     id offPillBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.15, 0.15, 0.18, 1.0);
@@ -1281,23 +1276,13 @@ static void updateAimSmoothHudState(void) {
 
     // Update on-screen floating Aim Smooth HUD button state
     if (g_aimHudToggleBtn) {
-        const char *aimText = "AIM: OFF";
-        id btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
-        id brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
-
-        if (aimSmoothEnabled) {
-            if (gunHolding == 0) {
-                // Bare hands / fists / head -> Free camera scrolling!
-                aimText = "AIM: IDLE";
-                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.80, 0.55, 0.05, 0.92);
-                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.80, 0.20, 0.85);
-            } else {
-                // Holding a gun -> Active Aimlock!
-                aimText = "AIM: ON";
-                btnBg = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95);
-                brdColor = ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90);
-            }
-        }
+        const char *aimText = aimSmoothEnabled ? "AIM: ON" : "AIM: OFF";
+        id btnBg = aimSmoothEnabled ?
+            ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.176, 0.333, 0.95) :
+            ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.10, 0.12, 0.18, 0.92);
+        id brdColor = aimSmoothEnabled ?
+            ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.40, 0.50, 0.90) :
+            ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.3, 0.8, 1.0, 0.35);
 
         id aimTitle = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), aimText);
         ((msgSend_id_id_long)objc_msgSend)(g_aimHudToggleBtn, sel("setTitle:forState:"), aimTitle, 0);
@@ -1766,58 +1751,8 @@ static void ensureFloatingFlyHUD(id win) {
     }
 }
 
-// Queries Python combat engine to check if avatar is currently holding a firearm (1) vs bare hands (0)
 static int checkPlayerHoldingGun(void) {
-    uint32_t count = _dyld_image_count();
-    intptr_t coreSlide = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        const char *name = _dyld_get_image_name(i);
-        if (name && strstr(name, "FlyMenu_core")) {
-            coreSlide = _dyld_get_image_vmaddr_slide(i);
-            break;
-        }
-    }
-    if (!coreSlide) return -1;
-    uint8_t *pCombatReady = (uint8_t *)(coreSlide + 0xc160);
-    // Never force premature Python initialization during lobby/boot: return -1 immediately
-    if (!pCombatReady || *pCombatReady != 1) return -1;
-    void **pCombatDict = (void **)(coreSlide + 0xc168);
-    if (!pCombatDict || !(*pCombatDict)) return -1;
-    void **pPyGILStateEnsure = (void **)(coreSlide + 0xc0f0);
-    void **pPyErrClear = (void **)(coreSlide + 0xc110);
-    void **pPyGILStateRelease = (void **)(coreSlide + 0xc118);
-    void **pPyRunString = (void **)(coreSlide + 0xc138);
-    void **pPyStringAsString = (void **)(coreSlide + 0xc150);
-    if (!pPyGILStateEnsure || !*pPyGILStateEnsure || !pPyGILStateRelease || !*pPyGILStateRelease || !pPyRunString || !*pPyRunString) return -1;
-
-    int (*PyGILState_Ensure)(void) = (int (*)(void))*pPyGILStateEnsure;
-    void (*PyGILState_Release)(int) = (void (*)(int))*pPyGILStateRelease;
-    void *(*PyRun_String)(const char *, int, void *, void *) = (void *(*)(const char *, int, void *, void *))*pPyRunString;
-    char *(*PyString_AsString)(void *) = pPyStringAsString ? (char *(*)(void *))*pPyStringAsString : NULL;
-    void (*PyErr_Clear)(void) = pPyErrClear ? (void (*)(void))*pPyErrClear : NULL;
-
-    int gstate = PyGILState_Ensure();
-    int hasGun = -1;
-    void *dict = *pCombatDict;
-    if (dict) {
-        void *res = PyRun_String("str(1 if is_holding_gun() else 0)", 258 /* Py_eval_input */, dict, dict);
-        if (res) {
-            if (PyString_AsString) {
-                char *s = PyString_AsString(res);
-                if (s) {
-                    if (s[0] == '1' || s[0] == 'T' || s[0] == 't') {
-                        hasGun = 1;
-                    } else if (s[0] == '0' || s[0] == 'F' || s[0] == 'f') {
-                        hasGun = 0;
-                    }
-                }
-            }
-            safePyDecref(res);
-        }
-        if (PyErr_Clear) PyErr_Clear();
-    }
-    PyGILState_Release(gstate);
-    return hasGun;
+    return -1;
 }
 
 static void createFloatingAimHUD(id win) {
@@ -3105,17 +3040,6 @@ static void initFlyMenuUI(void) {
             s_armed = YES;
             printf("[FlyMenuUI] UI timer successfully armed\n");
             timerTick_imp(g_uiMgr, sel("timerTick:"), timer);
-
-            // Arm CADisplayLink for 60/120 FPS ultra-smooth V-SYNC ESP line tracking
-            Class caDisplayLinkCls = cls("CADisplayLink");
-            if (caDisplayLinkCls) {
-                id dLink = ((id (*)(id, SEL, id, SEL))objc_msgSend)((id)caDisplayLinkCls, sel("displayLinkWithTarget:selector:"), g_uiMgr, sel("displayLinkTick:"));
-                if (dLink) {
-                    ((void (*)(id, SEL, id, id))objc_msgSend)(dLink, sel("addToRunLoop:forMode:"), mainLoop, commonMode);
-                    s_hasDisplayLink = YES;
-                    printf("[FlyMenuUI] CADisplayLink successfully armed for 60/120 FPS smooth ESP tracking\n");
-                }
-            }
         }
     };
 

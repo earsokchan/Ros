@@ -194,74 +194,6 @@ def _screen_point(camera, point, resolution, origin, forward):
         return None
 
 
-def _is_vehicle(go, entity=None):
-    try:
-        if entity is None and go is not None:
-            entity = getattr(go, 'entity', None)
-
-        # 1. Check entity class name for vehicle/car/bike signatures
-        if entity is not None:
-            cname = getattr(entity, '__class__', None)
-            cname_str = getattr(cname, '__name__', '') if cname else ''
-            low_c = cname_str.lower()
-            if any(k in low_c for k in ('vehicle', 'car', 'bike', 'motor', 'bicycle', 'jeep',
-                                        'truck', 'boat', 'van', 'glider', 'plane', 'aircraft',
-                                        'hover', 'drivable', 'quad', 'scooter')):
-                return True
-            # Vehicle-specific attributes in Rules of Survival
-            if any(hasattr(entity, attr) for attr in ('driver', 'passengers', 'seat_count',
-                                                      'wheel_count', 'vehicle_id', 'vehicleId',
-                                                      'is_vehicle', 'drive', 'maxSpeed', 'curSpeed',
-                                                      'engine_rpm', 'steer_angle')):
-                return True
-
-        # 2. Check GameObject name for vehicle signatures
-        if go is not None:
-            gname = getattr(go, 'name', '') or ''
-            low_g = gname.lower()
-            if any(k in low_g for k in ('vehicle', 'car', 'bike', 'motor', 'bicycle', 'jeep',
-                                        'truck', 'boat', 'van', 'glider', 'plane', 'aircraft',
-                                        'sports_car', 'drivable', 'quad', 'scooter', 'pickup')):
-                return True
-        return False
-    except Exception:
-        return False
-
-
-def _is_enemy_character(go, entity, service):
-    try:
-        if _is_vehicle(go, entity):
-            return False
-
-        # ServiceAPI classification
-        if service is not None:
-            try:
-                if callable(getattr(service, 'isVehicle', None)) and service.isVehicle(entity):
-                    return False
-            except Exception:
-                pass
-            is_av = bool(service.isAvatar(entity)) if callable(getattr(service, 'isAvatar', None)) else False
-            is_rb = bool(service.isRobot(entity)) if callable(getattr(service, 'isRobot', None)) else False
-            if is_av or is_rb:
-                return True
-
-        # Fallback check on class and object name
-        cname = getattr(entity, '__class__', None)
-        cname_str = getattr(cname, '__name__', '') if cname else ''
-        go_name = getattr(go, 'name', '') or ''
-        combined = (cname_str + ' ' + go_name).lower()
-        if any(k in combined for k in ('avatar', 'player', 'robot', 'human', 'npc', 'character', 'combatunit', 'actor')):
-            return True
-
-        # Character-specific attributes in Rules of Survival
-        if any(hasattr(entity, attr) for attr in ('role_name', 'roleName', 'nickname', 'campType',
-                                                  'isBattleMate', 'is_downed', 'isDowned', 'isKnocked')):
-            return True
-
-        return False
-    except Exception:
-        return True
-
 def _is_downed(entity, go=None):
     try:
         if entity is None and go is not None:
@@ -288,62 +220,26 @@ def _is_downed(entity, go=None):
         return False
 
 
-
-
 def _enemy(go, player, service):
     try:
         if go is None:
             return False
-        # Do not target local player's game object
-        p_go = getattr(player, 'gameObject', None)
-        if go is player or (p_go is not None and go is p_go):
-            return False
-
         entity = getattr(go, 'entity', None)
         local = getattr(player, 'entity', None) if player is not None else None
-
-        if entity is None or local is None:
+        if entity is None or local is None or getattr(entity, 'id', None) == getattr(local, 'id', None):
             return False
-
-        eid = getattr(entity, 'id', None)
-        lid = getattr(local, 'id', None)
-        if eid is not None and lid is not None and eid == lid:
-            return False
-
-        # Strictly filter out vehicles (cars, bikes, motorcycles, trucks, etc.)
-        if _is_vehicle(go, entity):
-            return False
-
-        # Only target enemy characters (avatars / player bots)
-        if not _is_enemy_character(go, entity, service):
-            return False
-
-        # Teammate check via live engine method
-        if callable(getattr(local, 'isBattleMate', None)):
-            try:
-                if eid is not None and local.isBattleMate(eid):
-                    return False
-            except Exception:
-                pass
-
-        # Camp check: only compare when both camp types are valid positive teams
+        if service is not None:
+            is_av = bool(service.isAvatar(entity)) if callable(getattr(service, 'isAvatar', None)) else False
+            is_rb = bool(service.isRobot(entity)) if callable(getattr(service, 'isRobot', None)) else False
+            if not (is_av or is_rb):
+                return False
         camp_e = getattr(entity, 'campType', None)
         camp_l = getattr(local, 'campType', None)
-        if camp_e is not None and camp_l is not None:
-            try:
-                ce = int(camp_e)
-                cl = int(camp_l)
-                if ce > 0 and cl > 0 and ce == cl:
-                    return False
-            except Exception:
-                pass
-
-        # Dead check: only reject if actually dead in game (turned to loot box)
-        # Downed / knocked / crawling players have hp == 0 but deadInGame == False!
-        if getattr(entity, 'deadInGame', False):
+        if camp_e is not None and camp_l is not None and camp_e == camp_l:
             return False
-
-        return True
+        if callable(getattr(local, 'isBattleMate', None)) and local.isBattleMate(entity.id):
+            return False
+        return (float(getattr(entity, 'hp', 1.0)) > 0.0 and not getattr(entity, 'deadInGame', False))
     except Exception:
         return False
 
@@ -354,14 +250,7 @@ _last_logged_debug = ''
 
 
 def _log_weapon_debug(info):
-    global _last_logged_debug
-    if info != _last_logged_debug:
-        _last_logged_debug = info
-        try:
-            with open('/tmp/ros_weapon_debug.txt', 'a') as f:
-                f.write('[%s] %s\n' % (time.strftime('%H:%M:%S'), info))
-        except Exception:
-            pass
+    pass
 
 
 def _is_using_gun(player, local_entity):
@@ -574,21 +463,7 @@ def _is_using_gun(player, local_entity):
         # ===== CHECK 4: Check if firing or scoped =====
         if _fire_held:
             _weapon_debug = 'firing->True'
-            _log_weapon_debug(_weapon_debug)
             return True
-
-        # ===== CHECK 5: Check player hand bone child transforms =====
-        if player is not None and hasattr(player, 'transform'):
-            try:
-                t = player.transform
-                for bone_name in ('R_Hand', 'RightHand', 'weapon_point', 'gun_mount', 'Hand_R'):
-                    bone = t.Find(bone_name) if hasattr(t, 'Find') else None
-                    if bone is not None and getattr(bone, 'childCount', 0) > 0:
-                        _weapon_debug = 'bone.%s.childCount>0->True' % bone_name
-                        _log_weapon_debug(_weapon_debug)
-                        return True
-            except Exception:
-                pass
 
         # ===== DEFAULT: True (Holding a gun) =====
         # When Aim Smooth is active and not detected as unarmed, allow aimlock to work smoothly
@@ -616,7 +491,9 @@ def _visible(Physics, RaycastHit, camera_position, point):
     return True
 
 
-def _extract_real_name(entity, go):
+def _extract_real_name(entity, go=None):
+    if entity is None and go is not None:
+        entity = getattr(go, 'entity', None)
     if entity is None:
         return 'Player'
     for attr in ('role_name', 'roleName', 'nickname', 'nick_name', 'charName', 'char_name', 'userName', 'username'):
@@ -633,20 +510,6 @@ def _extract_real_name(entity, go):
                         return clean
         except Exception:
             pass
-    try:
-        raw_name = getattr(go, 'name', '') or ''
-        if raw_name:
-            if isinstance(raw_name, unicode):
-                raw_name = raw_name.encode('utf-8', 'ignore')
-            low_go = str(raw_name).lower()
-            if '(clone)' in low_go or 'avatar' in low_go or 'robot' in low_go:
-                return 'Player'
-            clean = str(raw_name).replace(' ', '_').replace(',', '').replace(';', '').replace('|', '').replace('\n', '').strip()[:14]
-            if clean:
-                return clean
-    except Exception:
-        pass
-    return 'Player'
     return 'Player'
 
 
@@ -786,53 +649,41 @@ def _tick():
         _clear_previous_target = _target_id
         _esp_state = 1 if _esp else 0
         _aim_state = 1 if _aim else 0
-        unit = None
-        character = None
-        entity_id = None
-        Globals_mod = sys.modules.get('Globals') or Globals
-        player = getattr(Globals_mod, 'player', None) or getattr(Globals_mod, 'local_player', None)
-        if _fly:
-            try:
-                target = _fly._target()
-                if target:
-                    unit, character, entity_id = target
-                    player = getattr(Globals_mod, 'player', None) or player
-            except Exception:
-                pass
-        if player is None:
-            _waiting = 'Waiting for local player'
+        ownership = _fly._target() if _fly else None
+        if ownership is None:
+            _waiting = 'Waiting for local character'
+            _clear_frame()
+            _target_id = None
+            _is_gun_held = 0
+            return
+        unit, character, entity_id = ownership
+        player = getattr(Globals, 'player', None)
+        if unit is None or character is None or player is None:
+            _waiting = 'Waiting for local player/unit'
             _clear_frame()
             _target_id = None
             _is_gun_held = 0
             return
         local_entity = getattr(player, 'entity', None)
-        if local_entity is None:
-            if hasattr(player, 'id') or hasattr(player, 'campType'):
-                local_entity = player
-            else:
-                _waiting = 'Waiting for player.entity'
-                _clear_frame()
-                _target_id = None
-                _is_gun_held = 0
-                return
-        if getattr(local_entity, 'deadInGame', False):
+        if local_entity is None or getattr(local_entity, 'deadInGame', False):
             _esp_state = 3 if _esp else 0
-            _aim_state = 3 if _aim else 0
-            _waiting = 'Local character dead'
+            _aim_state = 3 if (_aim or _aim_smooth) else 0
+            _waiting = 'Local character dead/unavailable'
             _clear_frame()
             _target_id = None
             _is_gun_held = 0
             return
-        if entity_id is None:
-            entity_id = getattr(local_entity, 'id', None)
-        if entity_id is None:
-            _waiting = 'Waiting for entity.id'
+        if (not getattr(unit, 'chInScene', False) or
+                getattr(unit, 'inVehicle', False) or
+                getattr(unit, '_useParachute', False) or
+                getattr(unit, '_observer', False)):
+            _waiting = 'Waiting for ground character (not in plane/parachute)'
             _clear_frame()
             _target_id = None
             _is_gun_held = 0
             return
 
-        # 1. SCENE TRANSITION & MATCH LOADING SETTLING PERIOD (3.5s quiet period)
+        # 1. SCENE TRANSITION & MATCH LOADING SETTLING PERIOD (3.0s quiet period)
         fingerprint = (id(player), entity_id)
         if fingerprint != _scene_fingerprint:
             _scene_fingerprint = fingerprint
@@ -844,34 +695,12 @@ def _tick():
             return
 
         elapsed = now - _scene_change_time
-        if elapsed < 3.5:
-            _waiting = 'Character loading on map... (%.1fs)' % max(0.1, 3.5 - elapsed)
+        if elapsed < 3.0:
+            _waiting = 'Character loading on map... (%.1fs)' % max(0.1, 3.0 - elapsed)
             _clear_frame()
             _target_id = None
             _is_gun_held = 0
             return
-
-        # 2. VERIFY GROUND CHARACTER IS SPAWNED AND ACTIVE (not in plane/parachute)
-        if unit is not None and character is not None:
-            if (not getattr(unit, 'chInScene', False) or
-                    getattr(unit, 'inVehicle', False) or
-                    getattr(unit, '_useParachute', False) or
-                    getattr(unit, '_observer', False)):
-                _waiting = 'Waiting for ground character (not in plane/parachute)'
-                _clear_frame()
-                _target_id = None
-                return
-
-        if character is not None:
-            try:
-                cpos = getattr(character, 'position', None)
-                if cpos is not None and (abs(float(cpos.x)) < 0.001 and abs(float(cpos.y)) < 0.001 and abs(float(cpos.z)) < 0.001):
-                    _waiting = 'Waiting for character 3D position'
-                    _clear_frame()
-                    _target_id = None
-                    return
-            except Exception:
-                pass
 
         owner = (id(player), entity_id)
         if owner != _owner:
@@ -915,17 +744,6 @@ def _tick():
                     point = get_point(go)
                 except Exception:
                     pass
-                if point is None:
-                    try:
-                        point = go.transform.position
-                    except Exception:
-                        pass
-                if point is None:
-                    try:
-                        ent = getattr(go, 'entity', None)
-                        point = getattr(ent, 'position', None)
-                    except Exception:
-                        pass
                 if point is None:
                     continue
 
@@ -1074,7 +892,7 @@ def _tick():
                             or getattr(control, 'controller', None) is not None):
                         raise Waiting('Unsupported live camera controller')
                     # Prioritize closest enemy to player character (exclude knocked/downed)
-                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not _is_vehicle(c[6]) and not c[10]]
+                    pool = [c for c in candidates if c[0] <= _capture_degrees and not c[8] and not c[10]]
                     # When shooting, retain locked target so sprays remain consistent on the target
                     if _fire_held and _clear_previous_target is not None:
                         retained = [c for c in pool if c[1] == _clear_previous_target]
@@ -1103,7 +921,7 @@ def _tick():
                             except Exception:
                                 is_inv = False
                         is_inv = bool(is_inv) if isinstance(is_inv, (bool, int)) else False
-                        if not _enemy(selected[6], player, service) or is_inv or _is_vehicle(selected[6]) or selected[10]:
+                        if not _enemy(selected[6], player, service) or is_inv or selected[10]:
                             selected = None
                             _target_id = None
                         else:
