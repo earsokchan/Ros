@@ -66,8 +66,8 @@ static id g_floatBtn = NULL;
 static id (*orig_pathForResource)(id self, SEL _cmd, id name, id ext) = NULL;
 
 // References to native core buttons + custom VIP buttons
-#define NUM_BUTTONS 13
-static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack, 10:AimSmooth, 11:FlyHud, 12:AutoScope
+#define NUM_BUTTONS 14
+static id g_coreBtns[NUM_BUTTONS] = { NULL };    // 0:Fly, 1:Up, 2:Down, 3:Aim, 4:Esp, 5:Info, 6:1Hit, 7:Speed, 8:Recoil, 9:Wallhack, 10:AimSmooth, 11:FlyHud, 12:AutoScope, 13:BulletLock
 static id g_rowPills[NUM_BUTTONS] = { NULL };    // Toggle switch indicators
 static id g_rowKnobs[NUM_BUTTONS] = { NULL };    // Inner sliding thumb knob
 static id g_rowLabels[NUM_BUTTONS] = { NULL };   // Clean titles
@@ -87,6 +87,7 @@ static id g_espRedBoxLayer = NULL;
 static id g_espGreenBoxLayer = NULL;
 #define MAX_ESP_LABELS 64
 static id g_espTextLayers[MAX_ESP_LABELS] = { NULL };
+static id g_espStatusLayer = NULL;
 static BOOL g_espActive = NO;
 static id g_infoModal = NULL;
 
@@ -638,7 +639,11 @@ static id getSwitchSender(BOOL state) {
 }
 
 static void ensureESPOverlayOnTop(void) {
-    return;
+    id win = getActiveWindow();
+    if (!win || !g_espOverlay) return;
+    ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_espOverlay);
+    if (g_panel) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_panel);
+    if (g_floatBtn) ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_floatBtn);
 }
 
 
@@ -1130,8 +1135,9 @@ static void updateRowLayout(void) {
 
         BOOL show = YES;
         if (g_selectedTab == 0) {
-            // Aim/Combat tab: show Aim (3), Aim Smooth (10), Auto Scope (12), ESP (4), 1 Hit (6), No Recoil (8)
-            show = (i == 3 || i == 10 || i == 12 || i == 4 || i == 6 || i == 8);
+            // Aim/Combat tab: show Aim (3), Aim Smooth (10), Bullet Lock (13),
+            // Auto Scope (12), ESP (4), 1 Hit (6), No Recoil (8)
+            show = (i == 3 || i == 10 || i == 13 || i == 12 || i == 4 || i == 6 || i == 8);
         } else if (g_selectedTab == 1) {
             // Wallhack tab: show ESP (4) and Wallhack (9)
             show = (i == 4 || i == 9);
@@ -1453,6 +1459,20 @@ static void updateRowStates(void) {
             }
         }
         setSwitchState(12, autoScopeOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
+
+        // Bullet Lock (Button 13)
+        static id s_keyBulletLock = NULL;
+        if (strCls && !s_keyBulletLock) {
+            s_keyBulletLock = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
+        }
+        BOOL bulletLockOn = NO;
+        if (defsCls && s_keyBulletLock) {
+            id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+            if (defs) {
+                bulletLockOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), s_keyBulletLock);
+            }
+        }
+        setSwitchState(13, bulletLockOn, onPillBg, offPillBg, whiteColor, knobOffColor, activeBorder, normalBorder);
 
         // Fly HUD Outside Screen (Button 11)
         static id s_keyFlyHud = NULL;
@@ -1875,7 +1895,7 @@ static void setupMenuUI(id win, id panel) {
         if (defs) {
             Class strCls = cls("NSString");
             if (strCls) {
-                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw10", "sw_esp", "sw_aimsmooth", "sw_aimbot", "sw_autoscope", NULL};
+                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw10", "sw_esp", "sw_aimsmooth", "sw_aimbot", "sw_autoscope", "sw_bulletlock", NULL};
                 for (int k = 0; resetKeys[k]; k++) {
                     id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), resetKeys[k]);
                     if (key) {
@@ -1981,6 +2001,13 @@ static void setupMenuUI(id win, id panel) {
             ((msgSend_void_id_sel_long)objc_msgSend)(btnAutoScope, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleAutoScope:"), 1 << 6);
             ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnAutoScope);
             g_coreBtns[12] = btnAutoScope;
+        }
+        // 13: Bullet Lock (Shot Auto-Hit)
+        id btnBulletLock = ((msgSend_id_long)objc_msgSend)((id)uiBtn, sel("buttonWithType:"), 0);
+        if (btnBulletLock) {
+            ((msgSend_void_id_sel_long)objc_msgSend)(btnBulletLock, sel("addTarget:action:forControlEvents:"), g_uiMgr, sel("toggleBulletLock:"), 1 << 6);
+            ((msgSend_void_id)objc_msgSend)(panel, sel("addSubview:"), btnBulletLock);
+            g_coreBtns[13] = btnBulletLock;
         }
     }
 
@@ -2192,7 +2219,8 @@ static void setupMenuUI(id win, id panel) {
         "Wallhack VIP",
         "Aim Smooth (Auto Aim)",
         "Fly HUD (Outside Screen)",
-        "Auto Scope (Close-Range Fire)"
+        "Auto Scope (Close-Range Fire)",
+        "Bullet Lock (Shot Auto-Hit)"
     };
 
     double startY = 84.0;
@@ -2392,19 +2420,22 @@ static void syncCombatConfigToDisk(void) {
     id kSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
     id kAutoScope = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_autoscope");
     id kEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+    id kBulletLock = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
 
     BOOL aimOn = NO;
     BOOL smoothOn = NO;
     BOOL autoScopeOn = NO;
     BOOL espOn = NO;
+    BOOL bulletLockOn = NO;
     if (kAim) aimOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
     if (kSmooth) smoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kSmooth);
     if (kAutoScope) autoScopeOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAutoScope);
     if (kEsp) espOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kEsp);
+    if (kBulletLock) bulletLockOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kBulletLock);
 
     char cfgBuf[256];
-    snprintf(cfgBuf, sizeof(cfgBuf), "aim=%d\naimsmooth=%d\nautoscope=%d\nesp=%d\nautoscope_range=35\n",
-             aimOn ? 1 : 0, smoothOn ? 1 : 0, autoScopeOn ? 1 : 0, espOn ? 1 : 0);
+    snprintf(cfgBuf, sizeof(cfgBuf), "aim=%d\naimsmooth=%d\nautoscope=%d\nesp=%d\nbulletlock=%d\nautoscope_range=35\n",
+             aimOn ? 1 : 0, smoothOn ? 1 : 0, autoScopeOn ? 1 : 0, espOn ? 1 : 0, bulletLockOn ? 1 : 0);
 
     FILE *f1 = fopen("/tmp/ros_combat.cfg", "w");
     if (f1) {
@@ -2493,6 +2524,29 @@ static void toggleAutoScope_imp(id self, SEL _cmd, id sender) {
     updateRowStates();
 
     printf("[FlyMenuUI] Auto Scope toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+}
+
+// Bullet Lock (Button 13) - every shot redirects to the enemy nearest the crosshair
+static void toggleBulletLock_imp(id self, SEL _cmd, id sender) {
+    Class defsCls = cls("NSUserDefaults");
+    if (!defsCls) return;
+    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+    if (!defs) return;
+
+    Class strCls = cls("NSString");
+    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
+    if (!key) return;
+
+    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+    BOOL newState = !cur;
+
+    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+
+    syncCombatConfigToDisk();
+    updateRowStates();
+
+    printf("[FlyMenuUI] Bullet Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
 }
 
 static BOOL runFlyPython(const char *cmd) {
@@ -2587,17 +2641,38 @@ static void onFlyHudLiftStop_imp(id self, SEL _cmd, id sender) {
 }
 
 static char *getESPSnapshot(void) {
-    // Crash-safe file IPC: the combat engine writes its ESP frame to
-    // /tmp/ros_esp.dat. No Python C-API and no memory pokes here.
-    FILE *f = fopen("/tmp/ros_esp.dat", "r");
-    if (!f) return NULL;
-    char buf[8192];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-    if (n == 0) return NULL;
-    buf[n] = '\0';
-    if (buf[0] == '\0' || strcmp(buf, "NONE") == 0) return NULL;
-    return strdup(buf);
+    // Crash-safe file IPC: the combat engine writes its ESP frame next to the
+    // script (app Documents) and to /tmp. Try each location; no Python C-API.
+    // The Documents path is resolved once (not re-allocated every tick).
+    static char s_espDocPath[1024] = {0};
+    static BOOL s_espDocResolved = NO;
+    if (!s_espDocResolved) {
+        s_espDocResolved = YES;
+        id docObj = getDocumentsPath("ros_esp.dat");
+        if (docObj) {
+            const char *cDoc = (const char *)((id (*)(id, SEL))objc_msgSend)(docObj, sel("UTF8String"));
+            if (cDoc) {
+                strncpy(s_espDocPath, cDoc, sizeof(s_espDocPath) - 1);
+                s_espDocPath[sizeof(s_espDocPath) - 1] = '\0';
+            }
+        }
+    }
+    const char *paths[3] = { s_espDocPath[0] ? s_espDocPath : NULL,
+                             "/tmp/ros_esp.dat",
+                             "/var/mobile/Documents/ros_esp.dat" };
+    for (int i = 0; i < 3; i++) {
+        if (!paths[i]) continue;
+        FILE *f = fopen(paths[i], "r");
+        if (!f) continue;
+        char buf[8192];
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        fclose(f);
+        if (n == 0) continue;
+        buf[n] = '\0';
+        if (buf[0] == '\0' || strcmp(buf, "NONE") == 0) continue;
+        return strdup(buf);
+    }
+    return NULL;
 }
 
 static void ensureESPOverlay(id win) {
@@ -2713,6 +2788,18 @@ static void ensureESPOverlay(id win) {
             ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), tLayer);
             g_espTextLayers[i] = tLayer;
         }
+
+        id status = ((id (*)(id, SEL))objc_msgSend)((id)textCls, sel("layer"));
+        ((msgSend_void_long)objc_msgSend)(status, sel("setHidden:"), 1);
+        ((msgSend_void_double)objc_msgSend)(status, sel("setFontSize:"), 11.0);
+        ((msgSend_void_double)objc_msgSend)(status, sel("setCornerRadius:"), 4.0);
+        ((msgSend_void_long)objc_msgSend)(status, sel("setMasksToBounds:"), 1);
+        ((msgSend_void_double)objc_msgSend)(status, sel("setContentsScale:"), screenScale);
+        if (alignCenter) ((msgSend_void_id)objc_msgSend)(status, sel("setAlignmentMode:"), alignCenter);
+        if (tagBg) ((msgSend_void_id)objc_msgSend)(status, sel("setBackgroundColor:"), ((id (*)(id, SEL))objc_msgSend)(tagBg, sel("CGColor")));
+        if (whiteC) ((msgSend_void_id)objc_msgSend)(status, sel("setForegroundColor:"), ((id (*)(id, SEL))objc_msgSend)(whiteC, sel("CGColor")));
+        ((msgSend_void_id)objc_msgSend)(overlayLayer, sel("addSublayer:"), status);
+        g_espStatusLayer = status;
     }
 
     ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), overlay);
@@ -2724,11 +2811,21 @@ static void updateESPOverlay(id win) {
     if (!g_espOverlay) return;
 
     CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
-    ((msgSend_void_rect)objc_msgSend)(g_espOverlay, sel("setFrame:"), winBounds);
-    if (g_espRedLineLayer) ((msgSend_void_rect)objc_msgSend)(g_espRedLineLayer, sel("setFrame:"), winBounds);
-    if (g_espGreenLineLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenLineLayer, sel("setFrame:"), winBounds);
-    if (g_espRedBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espRedBoxLayer, sel("setFrame:"), winBounds);
-    if (g_espGreenBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenBoxLayer, sel("setFrame:"), winBounds);
+
+    // Only resize when the window actually changes size (avoids layout churn
+    // every tick, which was causing frame hitches).
+    static CGRect s_lastEspBounds = {{0, 0}, {0, 0}};
+    if (winBounds.size.width != s_lastEspBounds.size.width ||
+        winBounds.size.height != s_lastEspBounds.size.height) {
+        s_lastEspBounds = winBounds;
+        ((msgSend_void_rect)objc_msgSend)(g_espOverlay, sel("setFrame:"), winBounds);
+        if (g_espRedLineLayer) ((msgSend_void_rect)objc_msgSend)(g_espRedLineLayer, sel("setFrame:"), winBounds);
+        if (g_espGreenLineLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenLineLayer, sel("setFrame:"), winBounds);
+        if (g_espRedBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espRedBoxLayer, sel("setFrame:"), winBounds);
+        if (g_espGreenBoxLayer) ((msgSend_void_rect)objc_msgSend)(g_espGreenBoxLayer, sel("setFrame:"), winBounds);
+    }
+    // Z-order is maintained sparingly in timerTick (every 20 ticks) instead of
+    // re-fronting five views on every frame.
 
     // ESP on/off from NSUserDefaults (sw_esp)
     static id s_espKey = NULL;
@@ -2751,6 +2848,7 @@ static void updateESPOverlay(id win) {
         if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
         if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
         if (g_espGreenBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenBoxLayer, sel("setPath:"), NULL);
+        if (g_espStatusLayer) ((msgSend_void_long)objc_msgSend)(g_espStatusLayer, sel("setHidden:"), 1);
         for (int i = 0; i < MAX_ESP_LABELS; i++) {
             if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
         }
@@ -2770,11 +2868,23 @@ static void updateESPOverlay(id win) {
             for (int i = 0; i < MAX_ESP_LABELS; i++) {
                 if (g_espTextLayers[i]) ((msgSend_void_long)objc_msgSend)(g_espTextLayers[i], sel("setHidden:"), 1);
             }
+            if (g_espStatusLayer) {
+                CGSize stSz = winBounds.size;
+                double stW = 200.0, stH = 18.0;
+                ((msgSend_void_rect)objc_msgSend)(g_espStatusLayer, sel("setFrame:"),
+                    CGRectMake((stSz.width - stW) * 0.5, stSz.height * 0.14, stW, stH));
+                id stTxt = ((id (*)(id, SEL, const char *))objc_msgSend)(
+                    ((id (*)(id, SEL))objc_msgSend)((id)cls("NSString"), sel("alloc")),
+                    sel("initWithUTF8String:"), "ESP ON - no target data");
+                if (stTxt) ((msgSend_void_id)objc_msgSend)(g_espStatusLayer, sel("setString:"), stTxt);
+                ((msgSend_void_long)objc_msgSend)(g_espStatusLayer, sel("setHidden:"), 0);
+            }
         }
         if (snapStr) free(snapStr);
         return;
     }
     s_emptyFrames = 0;
+    if (g_espStatusLayer) ((msgSend_void_long)objc_msgSend)(g_espStatusLayer, sel("setHidden:"), 1);
 
     Class caTrans = cls("CATransaction");
     if (caTrans) {
@@ -2801,6 +2911,7 @@ static void updateESPOverlay(id win) {
 
     Class nsString = cls("NSString");
     int labelIdx = 0;
+    static char s_lastEspTag[MAX_ESP_LABELS][96];
 
     if (strchr(snapStr, ',') != NULL) {
         // Rich ESP format: canShoot,lx,ly,bx,by,bw,bh,dist,name;...
@@ -2853,7 +2964,6 @@ static void updateESPOverlay(id win) {
                 id tLayer = g_espTextLayers[labelIdx];
                 char tagStr[96];
                 snprintf(tagStr, sizeof(tagStr), "%s [%dm]", nameBuf, dist);
-                id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
 
                 double tagW = strlen(tagStr) * 6.5 + 14.0;
                 if (tagW < 60.0) tagW = 60.0;
@@ -2863,7 +2973,14 @@ static void updateESPOverlay(id win) {
                 if (tagY < 20.0) tagY = s_by + s_bh + 2.0;
 
                 ((msgSend_void_rect)objc_msgSend)(tLayer, sel("setFrame:"), CGRectMake(tagX, tagY, tagW, tagH));
-                if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
+                // Re-rendering text is expensive; only update when the string
+                // actually changed (positions still track every frame).
+                if (strcmp(s_lastEspTag[labelIdx], tagStr) != 0) {
+                    strncpy(s_lastEspTag[labelIdx], tagStr, sizeof(s_lastEspTag[labelIdx]) - 1);
+                    s_lastEspTag[labelIdx][sizeof(s_lastEspTag[labelIdx]) - 1] = '\0';
+                    id nsTxt = nsString ? ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), tagStr) : NULL;
+                    if (nsTxt) ((msgSend_void_id)objc_msgSend)(tLayer, sel("setString:"), nsTxt);
+                }
                 ((msgSend_void_long)objc_msgSend)(tLayer, sel("setHidden:"), 0);
                 labelIdx++;
             }
@@ -2905,6 +3022,8 @@ static void updateESPOverlay(id win) {
 }
 
 static BOOL s_hasDisplayLink = NO;
+static id s_displayLink = NULL;
+static volatile unsigned long s_espTickCount = 0;
 
 static void timerTick_imp(id self, SEL _cmd, id timer) {
     static int tickCount = 0;
@@ -2999,14 +3118,22 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
         }
     }
 
-    // 3. Render rich ESP overlay smoothly (fallback if CADisplayLink is not present)
+    // 3. Render rich ESP overlay. Normally the dedicated 30 Hz timer drives it;
+    // this is a watchdog so ESP can never freeze if that timer stops firing.
     if (!s_hasDisplayLink) {
         updateESPOverlay(win);
+    } else {
+        static unsigned long s_lastEspSeen = 0;
+        if (s_espTickCount == s_lastEspSeen) {
+            updateESPOverlay(win);
+        }
+        s_lastEspSeen = s_espTickCount;
     }
 }
 
 static void displayLinkTick_imp(id self, SEL _cmd, id sender) {
     @autoreleasepool {
+        s_espTickCount++;
         id win = getActiveWindow();
         if (win) {
             updateESPOverlay(win);
@@ -3109,6 +3236,7 @@ static void initFlyMenuUI(void) {
         class_addMethod(uiMgrCls, sel("toggleAimbot:"), (IMP)toggleAimbot_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleAutoScope:"), (IMP)toggleAutoScope_imp, "v@:@");
+        class_addMethod(uiMgrCls, sel("toggleBulletLock:"), (IMP)toggleBulletLock_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("onFlyHudToggle:"), (IMP)onFlyHudToggle_imp, "v@:@");
         class_addMethod(uiMgrCls, sel("onFlyHudUpStart:"), (IMP)onFlyHudUpStart_imp, "v@:@");
@@ -3128,6 +3256,7 @@ static void initFlyMenuUI(void) {
             class_addMethod(uiMgrCls, sel("toggleAimbot:"), (IMP)toggleAimbot_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleAimSmooth:"), (IMP)toggleAimSmooth_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleAutoScope:"), (IMP)toggleAutoScope_imp, "v@:@");
+            class_addMethod(uiMgrCls, sel("toggleBulletLock:"), (IMP)toggleBulletLock_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("toggleEsp:"), (IMP)toggleEsp_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("onFlyHudToggle:"), (IMP)onFlyHudToggle_imp, "v@:@");
             class_addMethod(uiMgrCls, sel("onFlyHudUpStart:"), (IMP)onFlyHudUpStart_imp, "v@:@");
@@ -3196,6 +3325,18 @@ static void initFlyMenuUI(void) {
             ((id (*)(id, SEL, id, id))objc_msgSend)(mainLoop, sel("addTimer:forMode:"), timer, commonMode);
             s_armed = YES;
             printf("[FlyMenuUI] UI timer successfully armed\n");
+
+            // ESP is redrawn from a dedicated 60 Hz timer. NSTimer is reliable
+            // on all devices here; CADisplayLink did not fire everywhere.
+            id espTimer = ((msgSend_id_id_sel_id_bool)objc_msgSend)((id)nsTimer, sel("timerWithTimeInterval:target:selector:userInfo:repeats:"),
+                                                                   (double)0.016, g_uiMgr, sel("displayLinkTick:"), NULL, YES);
+            if (espTimer) {
+                ((id (*)(id, SEL, id, id))objc_msgSend)(mainLoop, sel("addTimer:forMode:"), espTimer, commonMode);
+                s_displayLink = espTimer;
+                s_hasDisplayLink = YES;
+                printf("[FlyMenuUI] ESP 60Hz timer armed\n");
+            }
+
             timerTick_imp(g_uiMgr, sel("timerTick:"), timer);
         }
     };
