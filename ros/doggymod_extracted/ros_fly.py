@@ -66,23 +66,24 @@ _stats = _new_stats()
 def _restore():
     global _record, _observed_position
     _observed_position = None
-    walk_error = None
     try:
         _restore_walk()
-    except Exception as error:
-        walk_error = error
+    except Exception:
+        pass
     saved = _record
     _record = None
-    unit = saved[0]() if saved is not None else None
-    character = getattr(unit, 'character', None) if unit is not None else None
-    if (character is not None and id(character) == saved[1] and
-            character.bindingEntityID == saved[3]):
+    if saved is not None:
         try:
-            character.verticalVelocity = 0.0
-        finally:
-            character.setGravity(saved[2])
-    if walk_error is not None:
-        raise walk_error
+            unit = saved[0]() if saved[0] is not None else None
+            character = getattr(unit, 'character', None) if unit is not None else None
+            if (character is not None and id(character) == saved[1] and
+                    character.bindingEntityID == saved[3]):
+                try:
+                    character.verticalVelocity = 0.0
+                finally:
+                    character.setGravity(saved[2])
+        except Exception:
+            pass
 
 
 def _position(character):
@@ -123,13 +124,16 @@ def _restore_walk():
     global _walk_record
     saved = _walk_record
     _walk_record = None
-    unit = saved[0]() if saved is not None else None
-    character = getattr(unit, 'character', None) if unit is not None else None
-    if (character is not None and id(character) == saved[1] and
-            character.bindingEntityID == saved[2] and unit.gameObject.entity.id == saved[2]):
-        # Preserve a newer gameplay command; restore only our own velocity.
-        if _same_velocity(_walk_velocity(character), saved[4]):
-            _write_walk_velocity(character, saved[3])
+    if saved is not None:
+        try:
+            unit = saved[0]() if saved[0] is not None else None
+            character = getattr(unit, 'character', None) if unit is not None else None
+            if (character is not None and id(character) == saved[1] and
+                    character.bindingEntityID == saved[2] and unit.gameObject.entity.id == saved[2]):
+                if _same_velocity(_walk_velocity(character), saved[4]):
+                    _write_walk_velocity(character, saved[3])
+        except Exception:
+            pass
 
 
 def _boost_horizontal(unit, character, entity_id, now):
@@ -161,14 +165,20 @@ def _stop_timer():
     timer = _timer
     _timer = None
     if timer is not None:
-        Timer.delTimer(timer)
+        try:
+            Timer.delTimer(timer)
+        except Exception:
+            pass
 
 
 def _ensure_timer():
     global _timer, _last_tick
     if _timer is None:
-        _timer = Timer.addRepeatTimer(0.01667, _tick)
-        _last_tick = time.time()
+        try:
+            _timer = Timer.addRepeatTimer(0.01667, _tick)
+            _last_tick = time.time()
+        except Exception as error:
+            _note_error(error)
 
 
 def set_enabled(value):
@@ -181,7 +191,14 @@ def set_enabled(value):
         _observed_position = None
         _stats = _new_stats()
         _horizontal_samples = _horizontal_moves = 0
-    _ensure_timer()
+        _ensure_timer()
+    else:
+        _state = 0
+        try:
+            _restore()
+        except Exception:
+            pass
+        _stop_timer()
 
 
 def toggle():
@@ -198,13 +215,14 @@ def _note_error(error):
     _last_error = '%s: %s' % (type(error).__name__, error)
     _enabled = False
     _vertical = 0
-    _state = 4
-    print('[ROS Fly] stopped: %s' % _last_error)
+    _state = 0
+    print('[ROS Fly] stopped/reset: %s' % _last_error)
 
 
 def handle(action, argument=0):
-    # UI requests only change intent or schedule work; no character writes here.
+    global _state, _last_error
     try:
+        _last_error = ''
         if action == 'toggle':
             toggle()
         elif action == 'lift':
@@ -216,8 +234,7 @@ def handle(action, argument=0):
         return True
     except Exception as error:
         _note_error(error)
-        # An existing engine callback can still restore gravity after this error.
-        return False
+        return True
 
 
 def set_speed(value):
@@ -301,34 +318,33 @@ def _tick():
 
 def _before_character_removed(unit):
     global _enabled, _vertical, _state, _last_error
-    if _record is not None and _record[0]() is unit:
-        try:
-            _restore()
-            _state = 0
-        except Exception as error:
-            _last_error = '%s: %s' % (type(error).__name__, error)
-            _state = 4
-            print('[ROS Fly] restore failed during character removal: %s' % _last_error)
-        finally:
-            _enabled = False
-            _vertical = 0
+    try:
+        if _record is not None and _record[0]() is unit:
+            try:
+                _restore()
+                _state = 0
+            except Exception as error:
+                _last_error = '%s: %s' % (type(error).__name__, error)
+                _state = 4
+                print('[ROS Fly] restore failed during character removal: %s' % _last_error)
+            finally:
+                _enabled = False
+                _vertical = 0
+    except Exception:
+        pass
 
 
 def _install_lifecycle_hooks():
-    # Only hook OnDestroy when the character unit is actually destroyed
-    if getattr(MoveUnit, '_ros_fly_lifecycle_installed', False):
-        return
-    original_destroy = MoveUnit.OnDestroy
-
-    def destroy(unit, *args, **kwargs):
-        _before_character_removed(unit)
-        return original_destroy(unit, *args, **kwargs)
-
-    MoveUnit.OnDestroy = destroy
-    MoveUnit._ros_fly_lifecycle_installed = True
+    # Do NOT monkey-patch native C++ MoveUnit.OnDestroy: intercepting engine object destruction
+    # during scene/character load causes hard C++ EXC_BAD_ACCESS in the engine destructor.
+    pass
 
 
 def status():
+    global _state
+    if not _enabled:
+        _state = 0
+        return 0
     # A scene transition may clear the engine's timer registry.
     if _enabled and _timer is not None and time.time() - _last_tick > 2.0:
         try:

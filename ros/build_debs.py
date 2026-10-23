@@ -19,15 +19,18 @@ def build_deb(is_rootless, out_name):
     with open(f'{tmp_build}/debian-binary', 'w') as f:
         f.write('2.0\n')
 
-    ctrl_content = f'''Package: com.doggymod.ros
-Name: ROS DoggyMod (Aimbot, ESP, Fly, 1 Hit, Speed, No Recoil & Wallhack VIP)
+    ctrl_content = f'''Package: com.ikhozzzz.ros
+Name: Ros_ikhozzzz VIP ({'v2 - Rootless' if is_rootless else 'v1 - Rootful'})
 Depends: mobilesubstrate
 Architecture: iphoneos-arm64
-Description: Rules of Survival VIP Mod Menu (ikhozzzz vip) with Floating Logo, Close [X] Button, Aimbot, ESP, Fly, 1 Hit Kill, Speed Epic, No Recoil 100% & Wallhack ({'Rootless' if is_rootless else 'Rootful'}).
-Maintainer: DoggyMod & ikhozzzz
-Author: DoggyMod
+Replaces: com.doggymod.ros
+Conflicts: com.doggymod.ros
+Provides: com.doggymod.ros
+Description: Rules of Survival VIP Mod Menu (Ros_ikhozzzz {'v2' if is_rootless else 'v1'}) with Floating Logo, Close [X] Button, Aimbot 360, Aim Smooth Auto, Auto Scope (Close-Range Fire), Fly Hack, 1 Hit Kill, Speed Epic, No Recoil 100% & Wallhack ({'Rootless' if is_rootless else 'Rootful'}).
+Maintainer: ikhozzzz
+Author: ikhozzzz & DoggyMod
 Section: Tweaks
-Version: 2.5.0
+Version: {'2.0.0' if is_rootless else '1.0.0'}
 Installed-Size: 2400
 '''
     with open(f'{tmp_build}/control/control', 'w') as f:
@@ -95,5 +98,14 @@ exit 0
     print(f'Successfully Built: {out_deb_ros} ({os.path.getsize(out_deb_ros)} bytes)')
     shutil.rmtree(tmp_build)
 
-build_deb(is_rootless=False, out_name='ROS_Doggymod_rootful.deb')
-build_deb(is_rootless=True, out_name='ROS_Doggymod_rootless.deb')
+# Update 1: Rootful -> Ros_ikhozzzz_v1.deb (and aliases)
+build_deb(is_rootless=False, out_name='Ros_ikhozzzz_v1.deb')
+for extra in ['Ros_ikhozzzz_rootful_v1.deb', 'Ros_ikhozzzz.deb', 'ROS_Doggymod_rootful.deb']:
+    shutil.copy(os.path.join(ros_dir, 'Ros_ikhozzzz_v1.deb'), os.path.join(ros_dir, extra))
+    shutil.copy(os.path.join(ros_dir, 'Ros_ikhozzzz_v1.deb'), os.path.join(workspace_dir, extra))
+
+# Update 2: Rootless -> Ros_ikhozzzz_v2.deb (and aliases)
+build_deb(is_rootless=True, out_name='Ros_ikhozzzz_v2.deb')
+for extra in ['Ros_ikhozzzz_rootless_v2.deb', 'ROS_Doggymod_rootless.deb']:
+    shutil.copy(os.path.join(ros_dir, 'Ros_ikhozzzz_v2.deb'), os.path.join(ros_dir, extra))
+    shutil.copy(os.path.join(ros_dir, 'Ros_ikhozzzz_v2.deb'), os.path.join(workspace_dir, extra))
