@@ -262,19 +262,12 @@ static id getActiveWindow(void) {
     return NULL;
 }
 
-// Suppress and remove on-screen UI from ROS.deb (caidan / menuView1, FPSDisplay)
-// while keeping DLG and DoggyMod VIP Menu 100% visible and functional.
+// Neuter only FPSDisplay without touching DLGMem ("dig") / caidan / menuView1
 static void dummyNoOp(id self, SEL _cmd, ...) {}
 
 static void suppressROSDebUI(void) {
-    // 1. Neuter the ROS.deb Chinese menu generator: -[NSObject caidan]
-    Class nsObj = cls("NSObject");
-    if (nsObj) {
-        Method mCaidan = class_getInstanceMethod(nsObj, sel("caidan"));
-        if (mCaidan) method_setImplementation(mCaidan, (IMP)dummyNoOp);
-    }
-
-    // 2. Neuter ROS.deb FPSDisplay label without returning nil from shareFPSDisplay
+    // Keep DLGMem ("dig") / -[NSObject caidan] completely untouched!
+    // Only neuter ROS.deb FPSDisplay label without returning nil from shareFPSDisplay
     Class fpsCls = cls("FPSDisplay");
     if (fpsCls) {
         Method mFpsInit = class_getInstanceMethod(fpsCls, sel("initDisplayLabel"));
@@ -285,19 +278,8 @@ static void suppressROSDebUI(void) {
 }
 
 static void purgeROSDebViews(void) {
-    // 1. Hide and detach the global _menuView1 from ROS.deb if it was ever allocated
-    id *pMenuView = (id *)dlsym(RTLD_DEFAULT, "menuView1");
-    if (pMenuView && *pMenuView) {
-        id mv = *pMenuView;
-        Class uiViewCls = cls("UIView");
-        if (uiViewCls && ((long (*)(id, SEL, id))objc_msgSend)(mv, sel("isKindOfClass:"), (id)uiViewCls)) {
-            ((msgSend_void_long)objc_msgSend)(mv, sel("setHidden:"), 1);
-            ((id (*)(id, SEL))objc_msgSend)(mv, sel("removeFromSuperview"));
-        }
-        *pMenuView = NULL;
-    }
-
-    // 2. Safely hide and detach FPSDisplay's label (FPSDisplay is an NSObject, NOT a UIView)
+    // Keep menuView1 (DLGMem "dig") completely untouched and functional!
+    // Only safely hide FPSDisplay's label
     Class fpsCls = cls("FPSDisplay");
     if (fpsCls) {
         id fpsInst = ((id (*)(id, SEL))objc_msgSend)((id)fpsCls, sel("shareFPSDisplay"));
@@ -577,6 +559,7 @@ static void toggleMenu_imp(id self, SEL _cmd, id sender) {
     if (!g_panel) return;
     long isHidden = (long)((long (*)(id, SEL))objc_msgSend)(g_panel, sel("isHidden"));
     if (isHidden) {
+        ((msgSend_void_long)objc_msgSend)(g_panel, sel("setUserInteractionEnabled:"), 1);
         ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 0);
         id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
         if (pSuper) {
@@ -584,12 +567,14 @@ static void toggleMenu_imp(id self, SEL _cmd, id sender) {
         }
     } else {
         ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 1);
+        ((msgSend_void_long)objc_msgSend)(g_panel, sel("setUserInteractionEnabled:"), 0);
     }
 }
 
 static void closeMenu_imp(id self, SEL _cmd, id sender) {
     if (!g_panel) return;
     ((msgSend_void_long)objc_msgSend)(g_panel, sel("setHidden:"), 1);
+    ((msgSend_void_long)objc_msgSend)(g_panel, sel("setUserInteractionEnabled:"), 0);
 }
 
 static BOOL swIsOn_fallback(id self, SEL _cmd) {
@@ -2220,7 +2205,7 @@ static void setupMenuUI(id win, id panel) {
         "Aim Smooth (Auto Aim)",
         "Fly HUD (Outside Screen)",
         "Auto Scope (Close-Range Fire)",
-        "Bullet Lock (Shot Auto-Hit)"
+        "Bullet Track (Auto Hit)"
     };
 
     double startY = 84.0;
@@ -2405,6 +2390,10 @@ static void setupMenuUI(id win, id panel) {
     if (g_tabBtns[0]) {
         selectTab_imp(g_uiMgr, sel("selectTab:"), g_tabBtns[0]);
     }
+
+    // Ensure the panel starts completely hidden and never intercepts touches when closed
+    ((msgSend_void_long)objc_msgSend)(panel, sel("setHidden:"), 1);
+    ((msgSend_void_long)objc_msgSend)(panel, sel("setUserInteractionEnabled:"), 0);
 }
 
 
@@ -2694,6 +2683,7 @@ static void ensureESPOverlay(id win) {
     ((msgSend_void_rect)objc_msgSend)(overlay, sel("setFrame:"), bounds);
     ((msgSend_void_long)objc_msgSend)(overlay, sel("setUserInteractionEnabled:"), 0);
     ((msgSend_void_long)objc_msgSend)(overlay, sel("setOpaque:"), 0);
+    ((msgSend_void_long)objc_msgSend)(overlay, sel("setHidden:"), 1);
 
     Class uiColor = cls("UIColor");
     if (uiColor) {
@@ -2844,6 +2834,7 @@ static void updateESPOverlay(id win) {
     g_espActive = espActive;
 
     if (!espActive) {
+        if (g_espOverlay) ((msgSend_void_long)objc_msgSend)(g_espOverlay, sel("setHidden:"), 1);
         if (g_espRedLineLayer) ((msgSend_void_id)objc_msgSend)(g_espRedLineLayer, sel("setPath:"), NULL);
         if (g_espGreenLineLayer) ((msgSend_void_id)objc_msgSend)(g_espGreenLineLayer, sel("setPath:"), NULL);
         if (g_espRedBoxLayer) ((msgSend_void_id)objc_msgSend)(g_espRedBoxLayer, sel("setPath:"), NULL);
@@ -2854,6 +2845,8 @@ static void updateESPOverlay(id win) {
         }
         return;
     }
+
+    if (g_espOverlay) ((msgSend_void_long)objc_msgSend)(g_espOverlay, sel("setHidden:"), 0);
 
     char *snapStr = getESPSnapshot();
 
@@ -3083,17 +3076,18 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
 
         // Keep floating logo, open menu, and ESP overlay properly ordered on top
         if (tickCount % 20 == 0) {
-            if (g_espOverlay) {
+            if (g_espOverlay && g_espActive) {
                 id espSuper = ((id (*)(id, SEL))objc_msgSend)(g_espOverlay, sel("superview"));
                 if (espSuper != win) {
                     ((msgSend_void_id)objc_msgSend)(win, sel("addSubview:"), g_espOverlay);
                 }
                 ((msgSend_void_id)objc_msgSend)(win, sel("bringSubviewToFront:"), g_espOverlay);
             }
-            if (g_panel) {
-                id pSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
-                if (pSuper) {
-                    ((msgSend_void_id)objc_msgSend)(pSuper, sel("bringSubviewToFront:"), g_panel);
+            long isHidden = g_panel ? (long)((long (*)(id, SEL))objc_msgSend)(g_panel, sel("isHidden")) : 1;
+            if (!isHidden) {
+                id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
+                if (curSuper) {
+                    ((msgSend_void_id)objc_msgSend)(curSuper, sel("bringSubviewToFront:"), g_panel);
                 }
             }
             if (g_floatBtn) {
@@ -3106,13 +3100,6 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
                 id aSuper = ((id (*)(id, SEL))objc_msgSend)(g_aimHudView, sel("superview"));
                 if (aSuper) {
                     ((msgSend_void_id)objc_msgSend)(aSuper, sel("bringSubviewToFront:"), g_aimHudView);
-                }
-            }
-            long isHidden = (long)((long (*)(id, SEL))objc_msgSend)(g_panel, sel("isHidden"));
-            if (!isHidden) {
-                id curSuper = ((id (*)(id, SEL))objc_msgSend)(g_panel, sel("superview"));
-                if (curSuper) {
-                    ((msgSend_void_id)objc_msgSend)(curSuper, sel("bringSubviewToFront:"), g_panel);
                 }
             }
         }

@@ -128,14 +128,7 @@ def patch_ros_dylib(path):
 
     slice_off = arm64_slice_offset(data)
 
-    target = slice_off + CAIDAN_VMADDR
-    old = bytes(data[target:target + 4])
-    if old == b'\xc0\x03\x5f\xd6':
-        print('caidan already patched')
-    else:
-        data[target:target + 4] = b'\xc0\x03\x5f\xd6'
-        print('Patched caidan at file offset %#x (%s -> ret)' % (target, old.hex()))
-
+    # Keep caidan completely untouched so DLGMem ("dig") menu works in the IPA!
     patch_speed_15x(data, slice_off)
 
     with open(path, 'wb') as f:

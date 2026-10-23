@@ -135,8 +135,9 @@ _bulletlock = False
 _bulletlock_until = 0.0
 _bulletlock_fire_prev = False
 _bulletlock_target = None
-_bulletlock_degrees = 45.0
-_bulletlock_hold = 0.45
+_bulletlock_degrees = 120.0
+_bulletlock_hold = 0.05
+_bullet_flick = None
 _esp_state = 0
 _aim_state = 0
 _timer = None
@@ -463,7 +464,7 @@ def _extract_real_name(entity, go=None):
 
 def _clear_frame():
     global _frame, _rich_esp_frame, _frame_time, _target_id, _fire_held, _last_esp_str
-    global _bulletlock_until, _bulletlock_fire_prev, _bulletlock_target
+    global _bulletlock_until, _bulletlock_fire_prev, _bulletlock_target, _bullet_flick
     global _lock_cache, _lock_camera
     _frame = ()
     _rich_esp_frame = ()
@@ -474,6 +475,7 @@ def _clear_frame():
     _bulletlock_until = 0.0
     _bulletlock_fire_prev = False
     _bulletlock_target = None
+    _bullet_flick = None
     _lock_cache = []
     _lock_camera = None
     _write_esp_file('')
@@ -826,11 +828,12 @@ def set_autoscope(val):
 
 
 def set_bulletlock(val):
-    global _bulletlock, _last_error, _bulletlock_fire_prev, _bulletlock_target
+    global _bulletlock, _last_error, _bulletlock_fire_prev, _bulletlock_target, _bullet_flick
     try:
         _bulletlock = bool(val)
         _bulletlock_fire_prev = False
         _bulletlock_target = None
+        _bullet_flick = None
         if _bulletlock:
             _ensure_timer()
         elif not (_esp or _aim or _aim_smooth or _autoscope):
@@ -1049,66 +1052,10 @@ def _tick():
         elif _autoscope_applied:
             _apply_autoscope(camera, _find_camera_controller(camera), False)
 
-        # Bullet Lock: on every shot, redirect the bullet to the enemy closest to
-        # the crosshair. Keeps that enemy locked for the whole burst even if the
-        # player clicked slightly off-target or on the wrong enemy.
-        lock_selected = None
-        if _bulletlock:
-            input_go = getattr(Globals, 'userInput', None)
-            lock_component = None
-            if input_go is not None and callable(getattr(input_go, 'GetComponent', None)):
-                try:
-                    lock_component = input_go.GetComponent('InputInterpred')
-                except Exception:
-                    lock_component = None
-            lock_fire = _fire_signal(lock_component) if lock_component is not None else False
-            if lock_fire and not _bulletlock_fire_prev:
-                pool = [c for c in candidates if c[0] <= _bulletlock_degrees and not c[8] and not c[10]]
-                pool.sort(key=lambda item: (item[0], item[7], item[1]))
-                _bulletlock_target = None
-                for candidate in pool[:16]:
-                    if _visible(Physics, RaycastHit, camera_position, candidate[4]):
-                        _bulletlock_target = candidate[1]
-                        _bulletlock_until = now + _bulletlock_hold
-                        break
-            _bulletlock_fire_prev = lock_fire
-            if lock_fire or now < _bulletlock_until:
-                retained = [c for c in candidates if c[1] == _bulletlock_target
-                            and not c[8] and not c[10]]
-                if retained:
-                    lock_selected = retained[0]
-                else:
-                    pool = [c for c in candidates if c[0] <= _bulletlock_degrees and not c[8] and not c[10]]
-                    pool.sort(key=lambda item: (item[0], item[7], item[1]))
-                    for candidate in pool[:16]:
-                        if _visible(Physics, RaycastHit, camera_position, candidate[4]):
-                            lock_selected = candidate
-                            _bulletlock_target = candidate[1]
-                            break
-            else:
-                _bulletlock_target = None
-            if lock_selected is not None:
-                control = camera.GetComponent('PlayerCameraController')
-                if (control is not None and callable(getattr(control, 'onRotateCamera', None))
-                        and getattr(control, 'controller', None) is None):
-                    latest_player = getattr(Globals, 'player', None)
-                    if latest_player is not None and latest_player is player:
-                        if (_enemy(lock_selected[6], player, service)
-                                and not getattr(lock_selected[6].entity, 'invincible', False)):
-                            yaw, pitch = _angle_offset(lock_selected[5], forward)
-                            _last_angles = (yaw, pitch)
-                            control.onRotateCamera(Vector2(yaw, pitch), True)
-                            _aim_writes += 1
-                            _target_id = lock_selected[1]
-                            if not (_aim or _aim_smooth):
-                                _aim_state = 6
-                        else:
-                            lock_selected = None
-                else:
-                    lock_selected = None
-
-        selected = lock_selected
-        if selected is None and (_aim or _aim_smooth):
+        # Bullet Track: 60Hz silent shot redirection is handled purely in _bulletlock_fast_tick()
+        # so player camera/screen is never locked or dragged away.
+        selected = None
+        if _aim or _aim_smooth:
             input_go = getattr(Globals, 'userInput', None)
             if input_go is None:
                 raise Waiting('Waiting for Globals.userInput')
@@ -1275,14 +1222,64 @@ def _esp_fast_tick():
         _last_error = 'ESP fast: %s: %s' % (type(esp_err).__name__, esp_err)
 
 
+def _redirect_bullet_target(target, player, origin):
+    try:
+        assist = sys.modules.get('weapon.ShootAssist')
+        if assist is not None:
+            for fn_name in ('set_target', 'setTarget', 'set_aim_target', 'setAimTarget',
+                            'lock_target', 'lockTarget', 'set_shoot_target'):
+                fn = getattr(assist, fn_name, None)
+                if callable(fn):
+                    try:
+                        fn(target[6])
+                        break
+                    except Exception:
+                        try:
+                            fn(target[6].entity)
+                            break
+                        except Exception:
+                            pass
+        shoot = sys.modules.get('common.shoot_utils')
+        if shoot is not None:
+            for fn_name in ('set_shoot_target', 'set_target', 'setAimTarget'):
+                fn = getattr(shoot, fn_name, None)
+                if callable(fn):
+                    try:
+                        fn(target[6])
+                        break
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
 def _bulletlock_fast_tick():
-    # 60 Hz shot redirection. Reuses the candidate list from the 30 Hz scan and
-    # re-reads the live camera so quick taps still snap the bullet to the enemy
-    # nearest the crosshair instead of the enemy the player actually clicked.
+    # 60 Hz silent shot redirection (Bullet Track / Magic Bullet).
+    # Snaps bullet to the enemy along the ESP line on shot, and immediately restores
+    # camera angle in 1 frame so player screen stays looking at their chosen direction (A).
     global _bulletlock_until, _bulletlock_fire_prev, _bulletlock_target
-    global _target_id, _aim_writes, _last_angles, _last_error
+    global _bullet_flick, _target_id, _aim_writes, _last_angles, _last_error
     if not _bulletlock:
         return
+
+    camera = _lock_camera
+    if camera is None or _lock_vector2 is None:
+        return
+
+    control = camera.GetComponent('PlayerCameraController')
+    if (control is None or not callable(getattr(control, 'onRotateCamera', None))
+            or getattr(control, 'controller', None) is not None):
+        return
+
+    # 1. Immediately restore camera view if a silent flick was applied on the previous frame
+    if _bullet_flick is not None:
+        try:
+            inv_yaw, inv_pitch = -_bullet_flick[0], -_bullet_flick[1]
+            control.onRotateCamera(_lock_vector2(inv_yaw, inv_pitch), True)
+        except Exception:
+            pass
+        _bullet_flick = None
+
     now = time.time()
     input_go = getattr(Globals, 'userInput', None)
     input_component = None
@@ -1291,15 +1288,17 @@ def _bulletlock_fast_tick():
             input_component = input_go.GetComponent('InputInterpred')
         except Exception:
             input_component = None
+
     fire_now = _fire_signal(input_component) if input_component is not None else False
-    if not fire_now and now >= _bulletlock_until:
+    if not fire_now:
         _bulletlock_fire_prev = False
         _bulletlock_target = None
         return
-    camera = _lock_camera
+
     candidates = _lock_cache
-    if camera is None or not candidates or _lock_vector2 is None:
+    if not candidates:
         return
+
     try:
         cam_tf = getattr(camera, 'transform', None)
         if cam_tf is None:
@@ -1307,36 +1306,19 @@ def _bulletlock_fast_tick():
         origin = _xyz(cam_tf.position)
         forward = _xyz(cam_tf.forward)
 
-        def _pick(pool):
-            pool = sorted([c for c in pool if c[0] <= _bulletlock_degrees],
-                          key=lambda item: (item[0], item[7], item[1]))
-            for candidate in pool[:16]:
-                if _visible(_lock_physics, _lock_raycast, origin, candidate[4]):
-                    return candidate
-            return None
-
-        if fire_now and not _bulletlock_fire_prev:
-            chosen = _pick(candidates)
-            if chosen is not None:
-                _bulletlock_target = chosen[1]
-                _bulletlock_until = now + _bulletlock_hold
-        _bulletlock_fire_prev = fire_now
-
+        # Pick best visible enemy along ESP line (within wide 120-degree cone)
+        pool = sorted([c for c in candidates if c[0] <= _bulletlock_degrees],
+                      key=lambda item: (item[0], item[7], item[1]))
         target = None
-        for candidate in candidates:
-            if candidate[1] == _bulletlock_target:
+        for candidate in pool[:16]:
+            if _visible(_lock_physics, _lock_raycast, origin, candidate[4]):
                 target = candidate
                 break
-        if target is None:
-            target = _pick(candidates)
-            _bulletlock_target = target[1] if target is not None else None
 
         if target is None:
+            _bulletlock_target = None
             return
-        control = camera.GetComponent('PlayerCameraController')
-        if (control is None or not callable(getattr(control, 'onRotateCamera', None))
-                or getattr(control, 'controller', None) is not None):
-            return
+
         latest_player = getattr(Globals, 'player', None)
         if latest_player is None or latest_player is not _lock_player:
             return
@@ -1344,11 +1326,18 @@ def _bulletlock_fast_tick():
             return
         if getattr(target[6].entity, 'invincible', False):
             return
+
+        # Redirect bullet trajectory via engine assist if available
+        _redirect_bullet_target(target, _lock_player, origin)
+
         point = _xyz(target[4])
         direction = tuple(a - b for a, b in zip(point, origin))
         yaw, pitch = _angle_offset(direction, forward)
-        _last_angles = (yaw, pitch)
+
+        # Apply 1-frame silent snap so bullet launches along ESP line directly into enemy
         control.onRotateCamera(_lock_vector2(yaw, pitch), True)
+        _bullet_flick = (yaw, pitch)
+        _last_angles = (yaw, pitch)
         _aim_writes += 1
         _target_id = target[1]
     except Exception as lock_err:
