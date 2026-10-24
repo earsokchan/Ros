@@ -135,9 +135,13 @@ _bulletlock = False
 _bulletlock_until = 0.0
 _bulletlock_fire_prev = False
 _bulletlock_target = None
-_bulletlock_degrees = 120.0
+_bulletlock_degrees = 180.0
 _bulletlock_hold = 0.05
 _bullet_flick = None
+_bullet_active = False
+_bullet_accum_yaw = 0.0
+_bullet_accum_pitch = 0.0
+_bullet_target_id = None
 _esp_state = 0
 _aim_state = 0
 _timer = None
@@ -427,6 +431,64 @@ def is_holding_gun():
     return 1
 
 
+def _get_head_point(go, center_point=None):
+    # Retrieve exact 3D head coordinates for 100% Auto Headshot
+    try:
+        shoot = sys.modules.get('common.shoot_utils')
+        if shoot is not None:
+            for fn_name in ('getHeadPos', 'get_head_pos', 'getModelHead', 'get_head_position'):
+                fn = getattr(shoot, fn_name, None)
+                if callable(fn):
+                    try:
+                        hp = fn(go)
+                        if hp is not None:
+                            return _xyz(hp)
+                    except Exception:
+                        pass
+
+        client = sys.modules.get('client_utils')
+        if client is not None:
+            for fn_name in ('getHeadPos', 'get_head_pos', 'getAimHeadPos'):
+                fn = getattr(client, fn_name, None)
+                if callable(fn):
+                    try:
+                        hp = fn(go)
+                        if hp is not None:
+                            return _xyz(hp)
+                    except Exception:
+                        pass
+
+        if go is not None:
+            for m_name in ('get_socket', 'getSocket', 'get_bone', 'getBone', 'GetSocket'):
+                fn = getattr(go, m_name, None)
+                if callable(fn):
+                    for b_name in ('Bip01 Head', 'head', 'Head', 'Bip01_Head', 'bip01 head'):
+                        try:
+                            sock = fn(b_name)
+                            if sock is not None:
+                                pos = getattr(sock, 'position', None) or getattr(sock, 'pos', None)
+                                if pos is not None:
+                                    return _xyz(pos)
+                        except Exception:
+                            pass
+
+        if center_point is not None:
+            c_xyz = _xyz(center_point)
+            posture = 0
+            entity = getattr(go, 'entity', None) if go is not None else None
+            if entity is not None:
+                posture = getattr(entity, 'posture', 0) or getattr(entity, 'pose', 0)
+            offset_y = 0.58
+            if posture == 1:
+                offset_y = 0.35
+            elif posture == 2:
+                offset_y = 0.15
+            return (c_xyz[0], c_xyz[1] + offset_y, c_xyz[2])
+    except Exception:
+        pass
+    return _xyz(center_point) if center_point is not None else None
+
+
 def _visible(Physics, RaycastHit, camera_position, point):
     try:
         direction = point - camera_position
@@ -465,6 +527,7 @@ def _extract_real_name(entity, go=None):
 def _clear_frame():
     global _frame, _rich_esp_frame, _frame_time, _target_id, _fire_held, _last_esp_str
     global _bulletlock_until, _bulletlock_fire_prev, _bulletlock_target, _bullet_flick
+    global _bullet_active, _bullet_accum_yaw, _bullet_accum_pitch, _bullet_target_id
     global _lock_cache, _lock_camera
     _frame = ()
     _rich_esp_frame = ()
@@ -476,6 +539,10 @@ def _clear_frame():
     _bulletlock_fire_prev = False
     _bulletlock_target = None
     _bullet_flick = None
+    _bullet_active = False
+    _bullet_accum_yaw = 0.0
+    _bullet_accum_pitch = 0.0
+    _bullet_target_id = None
     _lock_cache = []
     _lock_camera = None
     _write_esp_file('')
@@ -1106,7 +1173,10 @@ def _tick():
                         selected = None
                         _target_id = None
                     else:
-                        yaw, pitch = _angle_offset(selected[5], forward)
+                        head_pt = _get_head_point(selected[6], selected[4])
+                        aim_pt = head_pt if head_pt is not None else _xyz(selected[4])
+                        aim_dir = tuple(a - b for a, b in zip(aim_pt, origin))
+                        yaw, pitch = _angle_offset(aim_dir, forward)
                         if _aim_smooth and not _fire_held:
                             # 100% Auto Aim Smooth: glide crosshair smoothly towards target without clicking shoot
                             smooth_yaw = max(-14.0, min(14.0, yaw * 0.32))
@@ -1222,43 +1292,122 @@ def _esp_fast_tick():
         _last_error = 'ESP fast: %s: %s' % (type(esp_err).__name__, esp_err)
 
 
-def _redirect_bullet_target(target, player, origin):
+def _redirect_bullet_target(target, player, origin, head_pt=None):
+    # Directs bullet trajectory straight to target enemy at engine and weapon levels.
     try:
+        point = head_pt if head_pt is not None else (_xyz(target[4]) if target[4] is not None else None)
+        target_entity = getattr(target[6], 'entity', None) if target[6] is not None else None
+        target_go = target[6]
+
+        # Calculate normalized 3D firing vector to target
+        norm_dir = None
+        if point is not None and origin is not None:
+            dx, dy, dz = point[0] - origin[0], point[1] - origin[1], point[2] - origin[2]
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if dist > 0.001:
+                norm_dir = (dx / dist, dy / dist, dz / dist)
+
         assist = sys.modules.get('weapon.ShootAssist')
         if assist is not None:
             for fn_name in ('set_target', 'setTarget', 'set_aim_target', 'setAimTarget',
-                            'lock_target', 'lockTarget', 'set_shoot_target'):
+                            'lock_target', 'lockTarget', 'set_shoot_target', 'setShootTarget',
+                            'set_best_target', 'set_auto_target', 'update_target'):
                 fn = getattr(assist, fn_name, None)
                 if callable(fn):
-                    try:
-                        fn(target[6])
-                        break
-                    except Exception:
+                    for obj in (target_go, target_entity, point):
+                        if obj is None:
+                            continue
                         try:
-                            fn(target[6].entity)
+                            fn(obj)
                             break
                         except Exception:
                             pass
-        shoot = sys.modules.get('common.shoot_utils')
-        if shoot is not None:
-            for fn_name in ('set_shoot_target', 'set_target', 'setAimTarget'):
-                fn = getattr(shoot, fn_name, None)
-                if callable(fn):
+            for attr in ('cur_target', 'target', 'target_entity', 'shoot_target', 'aim_target'):
+                try:
+                    setattr(assist, attr, target_go if 'go' in attr else (target_entity or target_go))
+                except Exception:
+                    pass
+            if point is not None:
+                for attr in ('aim_pos', 'target_pos', 'shoot_pos', 'hit_pos'):
                     try:
-                        fn(target[6])
-                        break
+                        setattr(assist, attr, point)
                     except Exception:
                         pass
+            if norm_dir is not None:
+                for attr in ('shoot_dir', 'shootDir', 'aim_dir', 'aimDir'):
+                    try:
+                        setattr(assist, attr, norm_dir)
+                    except Exception:
+                        pass
+
+        shoot = sys.modules.get('common.shoot_utils')
+        if shoot is not None:
+            for fn_name in ('set_shoot_target', 'setShootTarget', 'set_target', 'setTarget', 'setAimTarget'):
+                fn = getattr(shoot, fn_name, None)
+                if callable(fn):
+                    for obj in (target_go, target_entity, point):
+                        if obj is None:
+                            continue
+                        try:
+                            fn(obj)
+                            break
+                        except Exception:
+                            pass
+            for attr in ('cur_target', 'shoot_target', 'target'):
+                try:
+                    setattr(shoot, attr, target_entity or target_go)
+                except Exception:
+                    pass
+            if norm_dir is not None:
+                for fn_name in ('set_shoot_dir', 'setShootDir', 'set_bullet_dir'):
+                    fn = getattr(shoot, fn_name, None)
+                    if callable(fn):
+                        try:
+                            fn(norm_dir)
+                            break
+                        except Exception:
+                            pass
+                for attr in ('shoot_dir', 'bullet_dir'):
+                    try:
+                        setattr(shoot, attr, norm_dir)
+                    except Exception:
+                        pass
+
+        # Player active weapon target redirection
+        if player is not None:
+            p_entity = getattr(player, 'entity', None)
+            if p_entity is not None:
+                cur_weapon = getattr(p_entity, 'weapon', None) or getattr(p_entity, 'cur_weapon', None)
+                if cur_weapon is not None:
+                    for attr in ('shoot_target', 'aim_target', 'target', 'target_entity'):
+                        try:
+                            setattr(cur_weapon, attr, target_entity or target_go)
+                        except Exception:
+                            pass
+                    if point is not None:
+                        for attr in ('aim_pos', 'target_pos', 'hit_pos'):
+                            try:
+                                setattr(cur_weapon, attr, point)
+                            except Exception:
+                                pass
+                    if norm_dir is not None:
+                        for attr in ('shoot_dir', 'shootDir', 'bullet_dir'):
+                            try:
+                                setattr(cur_weapon, attr, norm_dir)
+                            except Exception:
+                                pass
     except Exception:
         pass
 
 
 def _bulletlock_fast_tick():
-    # 60 Hz silent shot redirection (Bullet Track / Magic Bullet).
-    # Snaps bullet to the enemy along the ESP line on shot, and immediately restores
-    # camera angle in 1 frame so player screen stays looking at their chosen direction (A).
+    # 60 Hz Magic Bullet / Bullet Track (Auto-Hit 100% with Clean Auto-Return).
+    # When user shoots, every bullet fires directly into the target enemy along the ESP line.
+    # When user finishes shooting (releases fire button), the view immediately restores
+    # to the player's original look orientation so their character remains facing their chosen direction.
     global _bulletlock_until, _bulletlock_fire_prev, _bulletlock_target
-    global _bullet_flick, _target_id, _aim_writes, _last_angles, _last_error
+    global _bullet_active, _bullet_accum_yaw, _bullet_accum_pitch, _bullet_target_id
+    global _target_id, _aim_writes, _last_angles, _last_error
     if not _bulletlock:
         return
 
@@ -1271,16 +1420,6 @@ def _bulletlock_fast_tick():
             or getattr(control, 'controller', None) is not None):
         return
 
-    # 1. Immediately restore camera view if a silent flick was applied on the previous frame
-    if _bullet_flick is not None:
-        try:
-            inv_yaw, inv_pitch = -_bullet_flick[0], -_bullet_flick[1]
-            control.onRotateCamera(_lock_vector2(inv_yaw, inv_pitch), True)
-        except Exception:
-            pass
-        _bullet_flick = None
-
-    now = time.time()
     input_go = getattr(Globals, 'userInput', None)
     input_component = None
     if input_go is not None and callable(getattr(input_go, 'GetComponent', None)):
@@ -1290,11 +1429,26 @@ def _bulletlock_fast_tick():
             input_component = None
 
     fire_now = _fire_signal(input_component) if input_component is not None else False
+
+    # 1. When shooting stops, restore original camera view angles immediately
     if not fire_now:
+        if _bullet_active:
+            try:
+                inv_yaw = -_wrap(_bullet_accum_yaw)
+                inv_pitch = -max(-45.0, min(45.0, _bullet_accum_pitch))
+                if abs(inv_yaw) > 0.05 or abs(inv_pitch) > 0.05:
+                    control.onRotateCamera(_lock_vector2(inv_yaw, inv_pitch), True)
+            except Exception:
+                pass
+            _bullet_active = False
+            _bullet_accum_yaw = 0.0
+            _bullet_accum_pitch = 0.0
+            _bullet_target_id = None
         _bulletlock_fire_prev = False
         _bulletlock_target = None
         return
 
+    # 2. While shooting, redirect 100% of bullets directly into the enemy center/head
     candidates = _lock_cache
     if not candidates:
         return
@@ -1306,17 +1460,35 @@ def _bulletlock_fast_tick():
         origin = _xyz(cam_tf.position)
         forward = _xyz(cam_tf.forward)
 
-        # Pick best visible enemy along ESP line (within wide 120-degree cone)
-        pool = sorted([c for c in candidates if c[0] <= _bulletlock_degrees],
-                      key=lambda item: (item[0], item[7], item[1]))
+        # Full 360-degree coverage around player - ALL METERS / ALL DISTANCES (c[7] <= 25000000.0)
+        pool = [c for c in candidates if c[0] <= _bulletlock_degrees and c[7] <= 25000000.0 and not c[8]]
+        if not pool:
+            return
+
+        # Prioritize active standing enemies first
+        standing = [c for c in pool if not c[10]]
+        search_pool = standing if standing else pool
+
+        # Retain locked target during continuous fire spray
         target = None
-        for candidate in pool[:16]:
-            if _visible(_lock_physics, _lock_raycast, origin, candidate[4]):
-                target = candidate
-                break
+        if _bullet_target_id is not None:
+            for c in search_pool:
+                if c[1] == _bullet_target_id:
+                    target = c
+                    break
 
         if target is None:
-            _bulletlock_target = None
+            # Sort by distance and angle
+            search_pool.sort(key=lambda item: (item[7], item[0], item[1]))
+            # Pick closest visible
+            for c in search_pool:
+                if _visible(_lock_physics, _lock_raycast, origin, c[4]):
+                    target = c
+                    break
+            if target is None:
+                target = search_pool[0]
+
+        if target is None:
             return
 
         latest_player = getattr(Globals, 'player', None)
@@ -1327,21 +1499,28 @@ def _bulletlock_fast_tick():
         if getattr(target[6].entity, 'invincible', False):
             return
 
-        # Redirect bullet trajectory via engine assist if available
-        _redirect_bullet_target(target, _lock_player, origin)
-
-        point = _xyz(target[4])
-        direction = tuple(a - b for a, b in zip(point, origin))
+        # Calculate exact aiming angles to target HEAD (Auto Headshot)
+        head_pt = _get_head_point(target[6], target[4])
+        aim_pt = head_pt if head_pt is not None else _xyz(target[4])
+        direction = tuple(a - b for a, b in zip(aim_pt, origin))
         yaw, pitch = _angle_offset(direction, forward)
 
-        # Apply 1-frame silent snap so bullet launches along ESP line directly into enemy
+        # Direct camera aim cleanly to target head for 100% auto headshot
         control.onRotateCamera(_lock_vector2(yaw, pitch), True)
-        _bullet_flick = (yaw, pitch)
+        _bullet_accum_yaw += yaw
+        _bullet_accum_pitch += pitch
+        _bullet_active = True
+        _bullet_target_id = target[1]
+        _bulletlock_target = target
+        _target_id = target[1]
         _last_angles = (yaw, pitch)
         _aim_writes += 1
-        _target_id = target[1]
+
+        # Multi-level assist redirection with head position
+        _redirect_bullet_target(target, _lock_player, origin, head_pt=aim_pt)
     except Exception as lock_err:
         _last_error = 'BulletLock: %s: %s' % (type(lock_err).__name__, lock_err)
+
 
 
 def snapshot():

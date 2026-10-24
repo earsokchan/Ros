@@ -161,13 +161,31 @@ def main():
     shutil.copy2(os.path.join(EXTRACTED, 'FlyMenu.dylib'), flymenu)
     shutil.copy2(os.path.join(EXTRACTED, 'FlyMenu_core.dylib'), coremenu)
 
+    # Set proper install names for IPA
+    run(['install_name_tool', '-id', '@executable_path/FlyMenu.dylib', flymenu])
+    run(['install_name_tool', '-id', '@executable_path/FlyMenu_core.dylib', coremenu])
+
+    # Strip any invalid macOS SDK framework paths if present
+    for bad_fw, good_fw in [
+        ('/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics',
+         '/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics'),
+        ('/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore',
+         '/System/Library/Frameworks/QuartzCore.framework/QuartzCore'),
+    ]:
+        subprocess.run(['install_name_tool', '-change', bad_fw, good_fw, flymenu], check=False)
+
     for p in (flymenu, coremenu, ros, client):
         sign(p)
+
+    comb_rel = 'Payload/client.app/ros_combat.py'
+    fly_rel = 'Payload/client.app/ros_fly.py'
+    shutil.copy2(os.path.join(EXTRACTED, 'ros_combat.py'), os.path.join(STAGE, comb_rel))
+    shutil.copy2(os.path.join(EXTRACTED, 'ros_fly.py'), os.path.join(STAGE, fly_rel))
 
     print('Copying base IPA -> output')
     shutil.copy2(BASE_IPA, OUT_IPA)
 
-    run(['zip', '-q', '-u', OUT_IPA, CLIENT_REL, ROS_REL, FLYMENU_REL, COREMENU_REL], cwd=STAGE)
+    run(['zip', '-q', '-u', OUT_IPA, CLIENT_REL, ROS_REL, FLYMENU_REL, COREMENU_REL, comb_rel, fly_rel], cwd=STAGE)
 
     print('Output: %s (%d bytes)' % (OUT_IPA, os.path.getsize(OUT_IPA)))
 

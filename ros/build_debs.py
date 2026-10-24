@@ -78,6 +78,13 @@ exit 0
     for dylib_name in ['FlyMenu.dylib', 'FlyMenu_core.dylib', 'ros.dylib', 'rosauthhook.dylib']:
         d_path = os.path.join(tweak_dir, dylib_name)
         if os.path.exists(d_path):
+            for bad_fw, good_fw in [
+                ('/System/Library/Frameworks/CoreGraphics.framework/Versions/A/CoreGraphics',
+                 '/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics'),
+                ('/System/Library/Frameworks/QuartzCore.framework/Versions/A/QuartzCore',
+                 '/System/Library/Frameworks/QuartzCore.framework/QuartzCore'),
+            ]:
+                subprocess.run(['install_name_tool', '-change', bad_fw, good_fw, d_path], check=False)
             subprocess.run(['install_name_tool', '-id', f'{prefix}/Library/MobileSubstrate/DynamicLibraries/{dylib_name}', d_path], check=True)
             subprocess.run(['codesign', '-f', '-s', '-', d_path], check=True)
 

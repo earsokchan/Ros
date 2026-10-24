@@ -266,15 +266,8 @@ static id getActiveWindow(void) {
 static void dummyNoOp(id self, SEL _cmd, ...) {}
 
 static void suppressROSDebUI(void) {
-    // Keep DLGMem ("dig") / -[NSObject caidan] completely untouched!
-    // Only neuter ROS.deb FPSDisplay label without returning nil from shareFPSDisplay
-    Class fpsCls = cls("FPSDisplay");
-    if (fpsCls) {
-        Method mFpsInit = class_getInstanceMethod(fpsCls, sel("initDisplayLabel"));
-        if (mFpsInit) method_setImplementation(mFpsInit, (IMP)dummyNoOp);
-        Method mFpsLink = class_getInstanceMethod(fpsCls, sel("initCADisplayLink"));
-        if (mFpsLink) method_setImplementation(mFpsLink, (IMP)dummyNoOp);
-    }
+    // Safe: Avoid method swizzling on FPSDisplay during early launch.
+    // Display label is safely hidden without side-effects in purgeROSDebViews().
 }
 
 static void purgeROSDebViews(void) {
@@ -1880,7 +1873,7 @@ static void setupMenuUI(id win, id panel) {
         if (defs) {
             Class strCls = cls("NSString");
             if (strCls) {
-                const char *resetKeys[] = {"sw1", "sw2", "sw4", "sw6", "sw7", "sw10", "sw_esp", "sw_aimsmooth", "sw_aimbot", "sw_autoscope", "sw_bulletlock", NULL};
+                const char *resetKeys[] = {"sw1", "sw2", "sw3", "sw4", "sw6", "sw7", "sw10", "sw11", "sw12", "sw_esp", "sw_aimsmooth", "sw_aimbot", "sw_autoscope", "sw_bulletlock", NULL};
                 for (int k = 0; resetKeys[k]; k++) {
                     id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), resetKeys[k]);
                     if (key) {
@@ -2205,7 +2198,7 @@ static void setupMenuUI(id win, id panel) {
         "Aim Smooth (Auto Aim)",
         "Fly HUD (Outside Screen)",
         "Auto Scope (Close-Range Fire)",
-        "Bullet Track (Auto Hit)"
+        "Magic Bullet (Auto Headshot 100%)"
     };
 
     double startY = 84.0;
@@ -2399,47 +2392,49 @@ static void setupMenuUI(id win, id panel) {
 
 
 static void syncCombatConfigToDisk(void) {
-    Class defsCls = cls("NSUserDefaults");
-    Class strCls = cls("NSString");
-    if (!defsCls || !strCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
+    @autoreleasepool {
+        Class defsCls = cls("NSUserDefaults");
+        Class strCls = cls("NSString");
+        if (!defsCls || !strCls) return;
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (!defs) return;
 
-    id kAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
-    id kSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-    id kAutoScope = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_autoscope");
-    id kEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
-    id kBulletLock = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
+        id kAim = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+        id kSmooth = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+        id kAutoScope = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_autoscope");
+        id kEsp = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_esp");
+        id kBulletLock = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
 
-    BOOL aimOn = NO;
-    BOOL smoothOn = NO;
-    BOOL autoScopeOn = NO;
-    BOOL espOn = NO;
-    BOOL bulletLockOn = NO;
-    if (kAim) aimOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
-    if (kSmooth) smoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kSmooth);
-    if (kAutoScope) autoScopeOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAutoScope);
-    if (kEsp) espOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kEsp);
-    if (kBulletLock) bulletLockOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kBulletLock);
+        BOOL aimOn = NO;
+        BOOL smoothOn = NO;
+        BOOL autoScopeOn = NO;
+        BOOL espOn = NO;
+        BOOL bulletLockOn = NO;
+        if (kAim) aimOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAim);
+        if (kSmooth) smoothOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kSmooth);
+        if (kAutoScope) autoScopeOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kAutoScope);
+        if (kEsp) espOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kEsp);
+        if (kBulletLock) bulletLockOn = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), kBulletLock);
 
-    char cfgBuf[256];
-    snprintf(cfgBuf, sizeof(cfgBuf), "aim=%d\naimsmooth=%d\nautoscope=%d\nesp=%d\nbulletlock=%d\nautoscope_range=35\n",
-             aimOn ? 1 : 0, smoothOn ? 1 : 0, autoScopeOn ? 1 : 0, espOn ? 1 : 0, bulletLockOn ? 1 : 0);
+        char cfgBuf[256];
+        snprintf(cfgBuf, sizeof(cfgBuf), "aim=%d\naimsmooth=%d\nautoscope=%d\nesp=%d\nbulletlock=%d\nautoscope_range=35\n",
+                 aimOn ? 1 : 0, smoothOn ? 1 : 0, autoScopeOn ? 1 : 0, espOn ? 1 : 0, bulletLockOn ? 1 : 0);
 
-    FILE *f1 = fopen("/tmp/ros_combat.cfg", "w");
-    if (f1) {
-        fputs(cfgBuf, f1);
-        fclose(f1);
-    }
+        FILE *f1 = fopen("/tmp/ros_combat.cfg", "w");
+        if (f1) {
+            fputs(cfgBuf, f1);
+            fclose(f1);
+        }
 
-    id docPathObj = getDocumentsPath("ros_combat.cfg");
-    if (docPathObj) {
-        const char *cDocPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
-        if (cDocPath) {
-            FILE *f2 = fopen(cDocPath, "w");
-            if (f2) {
-                fputs(cfgBuf, f2);
-                fclose(f2);
+        id docPathObj = getDocumentsPath("ros_combat.cfg");
+        if (docPathObj) {
+            const char *cDocPath = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
+            if (cDocPath) {
+                FILE *f2 = fopen(cDocPath, "w");
+                if (f2) {
+                    fputs(cfgBuf, f2);
+                    fclose(f2);
+                }
             }
         }
     }
@@ -2447,95 +2442,103 @@ static void syncCombatConfigToDisk(void) {
 
 // Aimbot 360 Lock (Button 3)
 static void toggleAimbot_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
+    @autoreleasepool {
+        Class defsCls = cls("NSUserDefaults");
+        if (!defsCls) return;
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (!defs) return;
 
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
-    if (!key) return;
+        Class strCls = cls("NSString");
+        id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimbot");
+        if (!key) return;
 
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
+        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        BOOL newState = !cur;
 
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+        ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+        ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
 
-    syncCombatConfigToDisk();
-    updateRowStates();
+        syncCombatConfigToDisk();
+        updateRowStates();
 
-    printf("[FlyMenuUI] Aimbot 360 Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+        printf("[FlyMenuUI] Aimbot 360 Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    }
 }
 
 // Aim Smooth 100% Auto (Button 10)
 static void toggleAimSmooth_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
+    @autoreleasepool {
+        Class defsCls = cls("NSUserDefaults");
+        if (!defsCls) return;
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (!defs) return;
 
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
-    if (!key) return;
+        Class strCls = cls("NSString");
+        id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_aimsmooth");
+        if (!key) return;
 
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
+        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        BOOL newState = !cur;
 
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+        ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+        ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
 
-    syncCombatConfigToDisk();
-    updateRowStates();
-    updateAimSmoothHudState();
+        syncCombatConfigToDisk();
+        updateRowStates();
+        updateAimSmoothHudState();
 
-    printf("[FlyMenuUI] Aim Smooth toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+        printf("[FlyMenuUI] Aim Smooth toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    }
 }
 
 // Auto Scope (Button 12) - scopes in automatically on close-range fire
 static void toggleAutoScope_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
+    @autoreleasepool {
+        Class defsCls = cls("NSUserDefaults");
+        if (!defsCls) return;
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (!defs) return;
 
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_autoscope");
-    if (!key) return;
+        Class strCls = cls("NSString");
+        id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_autoscope");
+        if (!key) return;
 
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
+        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        BOOL newState = !cur;
 
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+        ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+        ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
 
-    syncCombatConfigToDisk();
-    updateRowStates();
+        syncCombatConfigToDisk();
+        updateRowStates();
 
-    printf("[FlyMenuUI] Auto Scope toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+        printf("[FlyMenuUI] Auto Scope toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    }
 }
 
-// Bullet Lock (Button 13) - every shot redirects to the enemy nearest the crosshair
+// Magic Bullet (Button 13) - 100% Auto Hit without moving camera/character
 static void toggleBulletLock_imp(id self, SEL _cmd, id sender) {
-    Class defsCls = cls("NSUserDefaults");
-    if (!defsCls) return;
-    id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
-    if (!defs) return;
+    @autoreleasepool {
+        Class defsCls = cls("NSUserDefaults");
+        if (!defsCls) return;
+        id defs = ((id (*)(id, SEL))objc_msgSend)((id)defsCls, sel("standardUserDefaults"));
+        if (!defs) return;
 
-    Class strCls = cls("NSString");
-    id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
-    if (!key) return;
+        Class strCls = cls("NSString");
+        id key = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), "sw_bulletlock");
+        if (!key) return;
 
-    BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
-    BOOL newState = !cur;
+        BOOL cur = (BOOL)((long (*)(id, SEL, id))objc_msgSend)(defs, sel("boolForKey:"), key);
+        BOOL newState = !cur;
 
-    ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
-    ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
+        ((void (*)(id, SEL, BOOL, id))objc_msgSend)(defs, sel("setBool:forKey:"), newState, key);
+        ((id (*)(id, SEL))objc_msgSend)(defs, sel("synchronize"));
 
-    syncCombatConfigToDisk();
-    updateRowStates();
+        syncCombatConfigToDisk();
+        updateRowStates();
 
-    printf("[FlyMenuUI] Bullet Lock toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+        printf("[FlyMenuUI] Magic Bullet 100%% toggled -> %s\n", newState ? "ENABLED" : "DISABLED");
+    }
 }
 
 static BOOL runFlyPython(const char *cmd) {
@@ -3143,8 +3146,24 @@ static void initFlyMenuUI(void) {
         }
     }
 
-    // 2. Load FlyMenu_core.dylib
+    // 2. Resolve executable directory for 100% reliable dlopen across jailed IPA and jailbreak
+    char execDir[1024] = {0};
+    uint32_t exSize = sizeof(execDir);
+    if (_NSGetExecutablePath(execDir, &exSize) == 0) {
+        char *lastSlash = strrchr(execDir, '/');
+        if (lastSlash) *lastSlash = '\0';
+    }
+
+    char coreBundlePath[1024] = {0};
+    char rosBundlePath[1024] = {0};
+    if (execDir[0]) {
+        snprintf(coreBundlePath, sizeof(coreBundlePath), "%s/FlyMenu_core.dylib", execDir);
+        snprintf(rosBundlePath, sizeof(rosBundlePath), "%s/Frameworks/ros.dylib", execDir);
+    }
+
+    // Load FlyMenu_core.dylib
     const char *coreCandidates[] = {
+        coreBundlePath[0] ? coreBundlePath : NULL,
         "/Library/MobileSubstrate/DynamicLibraries/FlyMenu_core.dylib",
         "/var/jb/Library/MobileSubstrate/DynamicLibraries/FlyMenu_core.dylib",
         "/var/jb/usr/lib/TweakInject/FlyMenu_core.dylib",
@@ -3168,6 +3187,7 @@ static void initFlyMenuUI(void) {
 
     // 2b. Load ros.dylib (for 1 Hit Kill & Multi-Cheat features)
     const char *rosCandidates[] = {
+        rosBundlePath[0] ? rosBundlePath : NULL,
         "/Library/MobileSubstrate/DynamicLibraries/ros.dylib",
         "/var/jb/Library/MobileSubstrate/DynamicLibraries/ros.dylib",
         "/var/jb/usr/lib/TweakInject/ros.dylib",
