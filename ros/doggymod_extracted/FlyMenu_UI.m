@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <libkern/OSAtomic.h>
 #include <time.h>
 #include <stdarg.h>
@@ -260,51 +261,92 @@ static void logSecurityEvent(const char *category, const char *severity, const c
     }
 }
 
+#define MAX_REPORTED_DYLIBS 128
+static char s_reportedImages[MAX_REPORTED_DYLIBS][256];
+static int s_reportedCount = 0;
+
+static BOOL isImageAlreadyReported(const char *path) {
+    if (!path) return YES;
+    for (int i = 0; i < s_reportedCount; i++) {
+        if (strcmp(s_reportedImages[i], path) == 0) {
+            return YES;
+        }
+    }
+    return NO;
+}
+
+static void markImageReported(const char *path) {
+    if (!path || s_reportedCount >= MAX_REPORTED_DYLIBS) return;
+    strncpy(s_reportedImages[s_reportedCount], path, sizeof(s_reportedImages[0]) - 1);
+    s_reportedImages[s_reportedCount][sizeof(s_reportedImages[0]) - 1] = '\0';
+    s_reportedCount++;
+}
+
 static int auditLoadedImages(void) {
     uint32_t count = _dyld_image_count();
     int anomaliesFound = 0;
 
     static const char *kSuspiciousKeywords[] = {
-        "MobileSubstrate",
-        "libsubstrate",
-        "CydiaSubstrate",
-        "TweakInject",
-        "substitute",
-        "ellekit",
-        "frida",
-        "cycript",
-        "SSLKillSwitch",
-        "Shadow",
-        "Liberty",
-        "FlyMenu_test",
-        NULL
+        "mobilesubstrate", "libsubstrate", "cydiasubstrate", "tweakinject",
+        "substitute", "ellekit", "frida", "cycript", "sslkillswitch",
+        "shadow", "liberty", "flymenu_test", NULL
     };
 
     for (uint32_t i = 0; i < count; i++) {
         const char *imgPath = _dyld_get_image_name(i);
-        if (!imgPath) continue;
+        if (!imgPath || imgPath[0] == '\0') continue;
 
-        // Check against known suspicious keywords
+        // Fast-path: Skip standard verified Apple system frameworks
+        if (strncmp(imgPath, "/System/Library/", 16) == 0 ||
+            strncmp(imgPath, "/usr/lib/system/", 16) == 0) {
+            continue;
+        }
+
+        // 1. Case-insensitive keyword verification
+        BOOL keywordMatched = NO;
         for (int k = 0; kSuspiciousKeywords[k]; k++) {
-            if (strstr(imgPath, kSuspiciousKeywords[k]) != NULL) {
+            if (strcasestr(imgPath, kSuspiciousKeywords[k]) != NULL) {
                 anomaliesFound++;
                 g_secDylibAnomalies++;
                 snprintf(g_secLastAnomaly, sizeof(g_secLastAnomaly), "Injected: %s", kSuspiciousKeywords[k]);
-                logSecurityEvent("DYLIB_AUDIT", "HIGH_RISK",
-                                 "Detected unauthorized injection library: %s (Index:%u)", imgPath, i);
+
+                if (!isImageAlreadyReported(imgPath)) {
+                    markImageReported(imgPath);
+                    logSecurityEvent("DYLIB_AUDIT", "HIGH_RISK",
+                                     "Detected unauthorized injection library: %s (Index:%u)", imgPath, i);
+                }
+                keywordMatched = YES;
                 break;
             }
         }
+        if (keywordMatched) continue;
 
-        // Check whether image is loaded from abnormal untrusted locations
+        // 2. Untrusted storage path audit (e.g. /tmp, /var/mobile/Containers/Data)
         if (strncmp(imgPath, "/tmp/", 5) == 0 ||
             strstr(imgPath, "/Containers/Data/Application/") != NULL) {
             if (strstr(imgPath, ".dylib") != NULL) {
                 anomaliesFound++;
                 g_secDylibAnomalies++;
                 snprintf(g_secLastAnomaly, sizeof(g_secLastAnomaly), "Abnormal path: %s", imgPath);
-                logSecurityEvent("DYLIB_AUDIT", "MEDIUM_RISK",
-                                 "Dynamic library loaded from untrusted data directory: %s", imgPath);
+
+                if (!isImageAlreadyReported(imgPath)) {
+                    markImageReported(imgPath);
+                    logSecurityEvent("DYLIB_AUDIT", "MEDIUM_RISK",
+                                     "Dynamic library loaded from untrusted data directory: %s", imgPath);
+                }
+            }
+        }
+
+        // 3. Mach-O Header Sanity Verification
+        const struct mach_header *header = _dyld_get_image_header(i);
+        if (header != NULL) {
+            if (header->magic != MH_MAGIC_64 && header->magic != MH_CIGAM_64) {
+                anomaliesFound++;
+                if (!isImageAlreadyReported(imgPath)) {
+                    markImageReported(imgPath);
+                    logSecurityEvent("HEADER_AUDIT", "CRITICAL",
+                                     "Invalid Mach-O 64-bit header magic: 0x%x in %s", header->magic, imgPath);
+                }
             }
         }
     }
