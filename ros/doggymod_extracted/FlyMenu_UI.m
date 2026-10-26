@@ -9,6 +9,7 @@
 #include <mach-o/dyld.h>
 #include <libkern/OSAtomic.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include "embedded_scripts.h"
 #import "embedded_header_png.h"
@@ -207,6 +208,171 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
     }
 
     return docPathObj;
+}
+
+// =========================================================================
+// ANTI-CHEAT DEFENSIVE SECURITY & RUNTIME INTEGRITY MODULE
+// =========================================================================
+
+static int g_secAuditsRun = 0;
+static int g_secDylibAnomalies = 0;
+static int g_secSwizzleAnomalies = 0;
+static char g_secLastAnomaly[256] = "None";
+
+static void logSecurityEvent(const char *category, const char *severity, const char *fmt, ...) {
+    char details[512];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(details, sizeof(details), fmt, args);
+    va_end(args);
+
+    time_t rawtime;
+    time(&rawtime);
+    struct tm *ti = localtime(&rawtime);
+    char timeStr[64];
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", ti);
+
+    char entry[1024];
+    snprintf(entry, sizeof(entry), "[%s] [%s] [%s] (PID:%d) %s\n",
+             timeStr, category, severity, getpid(), details);
+
+    // Print to console / syslog
+    printf("[ROS_SECURITY_DEFENSE] %s", entry);
+
+    // Write to /tmp/ros_security_audit.log
+    FILE *fTmp = fopen("/tmp/ros_security_audit.log", "a");
+    if (fTmp) {
+        fputs(entry, fTmp);
+        fclose(fTmp);
+    }
+
+    // Write to App Documents/ros_security_audit.log
+    id docPathObj = getDocumentsPath("ros_security_audit.log");
+    if (docPathObj) {
+        const char *docStr = (const char *)((id (*)(id, SEL))objc_msgSend)(docPathObj, sel("UTF8String"));
+        if (docStr) {
+            FILE *fDoc = fopen(docStr, "a");
+            if (fDoc) {
+                fputs(entry, fDoc);
+                fclose(fDoc);
+            }
+        }
+    }
+}
+
+static int auditLoadedImages(void) {
+    uint32_t count = _dyld_image_count();
+    int anomaliesFound = 0;
+
+    static const char *kSuspiciousKeywords[] = {
+        "MobileSubstrate",
+        "libsubstrate",
+        "CydiaSubstrate",
+        "TweakInject",
+        "substitute",
+        "ellekit",
+        "frida",
+        "cycript",
+        "SSLKillSwitch",
+        "Shadow",
+        "Liberty",
+        "FlyMenu_test",
+        NULL
+    };
+
+    for (uint32_t i = 0; i < count; i++) {
+        const char *imgPath = _dyld_get_image_name(i);
+        if (!imgPath) continue;
+
+        // Check against known suspicious keywords
+        for (int k = 0; kSuspiciousKeywords[k]; k++) {
+            if (strstr(imgPath, kSuspiciousKeywords[k]) != NULL) {
+                anomaliesFound++;
+                g_secDylibAnomalies++;
+                snprintf(g_secLastAnomaly, sizeof(g_secLastAnomaly), "Injected: %s", kSuspiciousKeywords[k]);
+                logSecurityEvent("DYLIB_AUDIT", "HIGH_RISK",
+                                 "Detected unauthorized injection library: %s (Index:%u)", imgPath, i);
+                break;
+            }
+        }
+
+        // Check whether image is loaded from abnormal untrusted locations
+        if (strncmp(imgPath, "/tmp/", 5) == 0 ||
+            strstr(imgPath, "/Containers/Data/Application/") != NULL) {
+            if (strstr(imgPath, ".dylib") != NULL) {
+                anomaliesFound++;
+                g_secDylibAnomalies++;
+                snprintf(g_secLastAnomaly, sizeof(g_secLastAnomaly), "Abnormal path: %s", imgPath);
+                logSecurityEvent("DYLIB_AUDIT", "MEDIUM_RISK",
+                                 "Dynamic library loaded from untrusted data directory: %s", imgPath);
+            }
+        }
+    }
+    return anomaliesFound;
+}
+
+static int verifyRuntimeMethodIntegrity(void) {
+    int swizzleAnomalies = 0;
+
+    // Check critical classes and methods
+    struct MethodTarget {
+        const char *className;
+        const char *selectorName;
+        BOOL isClassMethod;
+    } targets[] = {
+        { "NSBundle", "pathForResource:ofType:", NO },
+        { "UIViewController", "viewDidLoad", NO },
+        { "UIApplication", "sendEvent:", NO },
+        { NULL, NULL, NO }
+    };
+
+    for (int i = 0; targets[i].className; i++) {
+        Class c = cls(targets[i].className);
+        if (!c) continue;
+        SEL s = sel(targets[i].selectorName);
+        Method m = targets[i].isClassMethod ? class_getClassMethod(c, s) : class_getInstanceMethod(c, s);
+        if (!m) continue;
+
+        IMP imp = method_getImplementation(m);
+        if (!imp) continue;
+
+        Dl_info dlinfo;
+        memset(&dlinfo, 0, sizeof(dlinfo));
+        if (dladdr((const void *)imp, &dlinfo) && dlinfo.dli_fname) {
+            const char *fname = dlinfo.dli_fname;
+            // Legitimate implementations should come from /System/Library, /usr/lib, or the base app bundle
+            BOOL isLegit = (strncmp(fname, "/System/Library/", 16) == 0 ||
+                            strncmp(fname, "/usr/lib/", 9) == 0 ||
+                            strstr(fname, ".app/client") != NULL);
+            if (!isLegit) {
+                swizzleAnomalies++;
+                g_secSwizzleAnomalies++;
+                snprintf(g_secLastAnomaly, sizeof(g_secLastAnomaly), "Swizzled: %s %s", targets[i].className, targets[i].selectorName);
+                logSecurityEvent("METHOD_INTEGRITY", "CRITICAL",
+                                 "Method tampered/swizzled: -[%s %s] -> IMP %p located in external binary: %s",
+                                 targets[i].className, targets[i].selectorName, imp, fname);
+            }
+        }
+    }
+    return swizzleAnomalies;
+}
+
+static void runPeriodicSecurityAudit(void) {
+    g_secAuditsRun++;
+    int dylibFlags = auditLoadedImages();
+    int swizzleFlags = verifyRuntimeMethodIntegrity();
+
+    if (dylibFlags > 0 || swizzleFlags > 0) {
+        logSecurityEvent("AUDIT_SUMMARY", "DEFENSIVE_REPORT",
+                         "Audit #%d complete: %d dylib anomalies, %d runtime method hooks detected.",
+                         g_secAuditsRun, dylibFlags, swizzleFlags);
+    } else {
+        if (g_secAuditsRun % 10 == 1) {
+            logSecurityEvent("AUDIT_HEARTBEAT", "INFO",
+                             "Runtime integrity verified. Status: OK (Audit #%d, %u dyld images scanned)",
+                             g_secAuditsRun, _dyld_image_count());
+        }
+    }
 }
 
 // 100% crash-safe -[NSBundle pathForResource:ofType:] swizzle
@@ -825,8 +991,9 @@ static void showCustomInfo_imp(id self, SEL _cmd, id sender) {
     }
 
     CGRect winBounds = ((CGRect (*)(id, SEL))objc_msgSend)(win, sel("bounds"));
+    runPeriodicSecurityAudit();
     double modalW = 340.0;
-    double modalH = 250.0;
+    double modalH = 265.0;
     if (modalW > winBounds.size.width - 20.0) modalW = winBounds.size.width - 20.0;
     if (modalH > winBounds.size.height - 20.0) modalH = winBounds.size.height - 20.0;
     double modalX = (winBounds.size.width - modalW) * 0.5;
@@ -1091,6 +1258,31 @@ static void showCustomInfo_imp(id self, SEL _cmd, id sender) {
                 }
                 ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), capLbl);
             }
+        }
+    }
+
+    // Bottom Security Defense Status Badge
+    if (uiLabel && nsStr) {
+        id secLbl = ((id (*)(id, SEL))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)uiLabel, sel("alloc")), sel("init"));
+        if (secLbl) {
+            ((msgSend_void_rect)objc_msgSend)(secLbl, sel("setFrame:"), CGRectMake(14, 202, modalW - 28, 48));
+            char secTxt[256];
+            snprintf(secTxt, sizeof(secTxt), "🛡️ AC Audit #%d | Injected: %d | Hooks: %d\nLast: %s",
+                     g_secAuditsRun, g_secDylibAnomalies, g_secSwizzleAnomalies, g_secLastAnomaly);
+            id sStr = ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsStr, sel("alloc")), sel("initWithUTF8String:"), secTxt);
+            if (sStr) ((msgSend_void_id)objc_msgSend)(secLbl, sel("setText:"), sStr);
+            ((msgSend_void_long)objc_msgSend)(secLbl, sel("setNumberOfLines:"), 2);
+            if (uiColor) {
+                id col = (g_secDylibAnomalies > 0 || g_secSwizzleAnomalies > 0) ?
+                    ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 1.0, 0.45, 0.45, 1.0) :
+                    ((msgSend_id_double4)objc_msgSend)((id)uiColor, sel("colorWithRed:green:blue:alpha:"), 0.35, 0.90, 0.45, 1.0);
+                if (col) ((msgSend_void_id)objc_msgSend)(secLbl, sel("setTextColor:"), col);
+            }
+            if (uiFont) {
+                id f = ((msgSend_id_double)objc_msgSend)((id)uiFont, sel("systemFontOfSize:"), 10.0);
+                if (f) ((msgSend_void_id)objc_msgSend)(secLbl, sel("setFont:"), f);
+            }
+            ((msgSend_void_id)objc_msgSend)(modal, sel("addSubview:"), secLbl);
         }
     }
 
@@ -3025,6 +3217,11 @@ static void timerTick_imp(id self, SEL _cmd, id timer) {
     static int tickCount = 0;
     tickCount++;
 
+    // Periodic Anti-Cheat Defensive Security Audit (every 5 seconds = 50 ticks)
+    if (tickCount % 50 == 0) {
+        runPeriodicSecurityAudit();
+    }
+
     static BOOL s_swizzledCoreInfo = NO;
     if (!s_swizzledCoreInfo) {
         Class targetCls = cls("ROSFlyTestTarget");
@@ -3134,6 +3331,7 @@ static void displayLinkTick_imp(id self, SEL _cmd, id sender) {
 __attribute__((constructor))
 static void initFlyMenuUI(void) {
     printf("[FlyMenuUI] Constructor called -> Initializing...\n");
+    runPeriodicSecurityAudit();
 
     // 1. Swizzle -[NSBundle pathForResource:ofType:] safely
     Class nsBundle = cls("NSBundle");

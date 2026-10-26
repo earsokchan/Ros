@@ -178,6 +178,105 @@ _max_lines = 64
 _last_angles = (0.0, 0.0)
 _weapon_debug = ''
 
+# =========================================================================
+# ANTI-CHEAT DEFENSIVE KINEMATICS & BALLISTICS VALIDATOR
+# =========================================================================
+
+_sec_kinematic_history = None  # (id(character), entity_id, pos, timestamp)
+_sec_anomalies_kinematic = 0
+_sec_anomalies_ballistic = 0
+_sec_last_anomaly = 'None'
+_sec_events = []
+_SEC_MAX_EVENTS = 100
+
+_MAX_LEGAL_SPRINT_SPEED = 12.0  # m/s on foot (normal max sprint is ~8.5 m/s)
+_MAX_LEGAL_VEHICLE_SPEED = 40.0  # m/s in car
+_MAX_BALLISTIC_DIVERGENCE_DEG = 45.0  # degrees threshold for legitimate aim
+
+
+def _write_security_audit(event_type, severity, details):
+    global _sec_last_anomaly, _sec_events
+    now_str = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
+    entry = '[%s] [%s] [%s] %s\n' % (now_str, event_type, severity, details)
+    _sec_last_anomaly = '%s: %s' % (event_type, details[:60])
+    _sec_events.append((now_str, event_type, severity, details))
+    if len(_sec_events) > _SEC_MAX_EVENTS:
+        _sec_events.pop(0)
+
+    for d in _io_dirs():
+        p = os.path.join(d, 'ros_security_audit.log')
+        try:
+            with open(p, 'a') as f:
+                f.write(entry)
+        except Exception:
+            pass
+
+
+def _validate_movement_kinematics(unit, character, entity_id, now):
+    global _sec_kinematic_history, _sec_anomalies_kinematic
+    if character is None:
+        return
+    try:
+        vec = getattr(character, 'position', None)
+        if vec is None:
+            return
+        pos = (float(vec.x), float(vec.y), float(vec.z))
+        prev = _sec_kinematic_history
+        _sec_kinematic_history = (id(character), entity_id, pos, now)
+        if prev is not None and prev[:2] == (id(character), entity_id):
+            dt = now - prev[3]
+            if 0.01 <= dt <= 2.0:
+                dx = pos[0] - prev[2][0]
+                dz = pos[2] - prev[2][2]
+                dist_horiz = (dx * dx + dz * dz) ** 0.5
+                speed = dist_horiz / dt
+
+                in_vehicle = bool(getattr(unit, 'inVehicle', False))
+                max_speed = _MAX_LEGAL_VEHICLE_SPEED if in_vehicle else _MAX_LEGAL_SPRINT_SPEED
+
+                if speed > max_speed:
+                    _sec_anomalies_kinematic += 1
+                    cat = 'TELEPORTATION' if speed > 100.0 else 'SPEED_HACK'
+                    details = 'Entity %s exceeded max velocity: %.2f m/s (Limit: %.2f m/s, dt=%.3fs, dist=%.2fm)' % (
+                        entity_id, speed, max_speed, dt, dist_horiz
+                    )
+                    _write_security_audit(cat, 'CRITICAL', details)
+    except Exception:
+        pass
+
+
+def _validate_ballistics(cam_origin, cam_forward, aim_pt, target_id, now):
+    global _sec_anomalies_ballistic
+    try:
+        target_dir = tuple(a - b for a, b in zip(aim_pt, cam_origin))
+        dist = sum(n * n for n in target_dir) ** 0.5
+        if dist < 0.001:
+            return
+
+        dir_norm = tuple(n / dist for n in target_dir)
+        dot = sum(a * b for a, b in zip(dir_norm, cam_forward))
+        dot_clamped = max(-1.0, min(1.0, dot))
+        divergence_deg = math.degrees(math.acos(dot_clamped))
+
+        if divergence_deg > _MAX_BALLISTIC_DIVERGENCE_DEG:
+            _sec_anomalies_ballistic += 1
+            details = 'Target %s ballistic divergence: %.1f deg (Threshold: %.1f deg, dist=%.1fm)' % (
+                target_id, divergence_deg, _MAX_BALLISTIC_DIVERGENCE_DEG, dist
+            )
+            _write_security_audit('BALLISTIC_DIVERGENCE', 'HIGH_RISK', details)
+    except Exception:
+        pass
+
+
+def get_security_telemetry():
+    return {
+        'kinematic_anomalies': _sec_anomalies_kinematic,
+        'ballistic_anomalies': _sec_anomalies_ballistic,
+        'last_anomaly': _sec_last_anomaly,
+        'recent_events_count': len(_sec_events),
+        'timestamp': time.time(),
+    }
+
 
 class Waiting(Exception):
     pass
@@ -989,6 +1088,9 @@ def _tick():
             _is_gun_held = 0
             return
 
+        # Defensive anti-cheat kinematic validation
+        _validate_movement_kinematics(unit, character, entity_id, now)
+
         owner = (id(player), entity_id)
         if owner != _owner:
             _clear_previous_target = None
@@ -1505,6 +1607,9 @@ def _bulletlock_fast_tick():
         direction = tuple(a - b for a, b in zip(aim_pt, origin))
         yaw, pitch = _angle_offset(direction, forward)
 
+        # Defensive anti-cheat ballistic divergence validation
+        _validate_ballistics(origin, forward, aim_pt, target[1], time.time())
+
         # Direct camera aim cleanly to target head for 100% auto headshot
         control.onRotateCamera(_lock_vector2(yaw, pitch), True)
         _bullet_accum_yaw += yaw
@@ -1562,6 +1667,7 @@ def esp_snapshot():
 
 
 def diagnostics():
+    sec = get_security_telemetry()
     return ('ESP/Aim build 11\nESP state: %d / Aim state: %d\n'
             'Timer ticks: %d / objects checked: %d\n'
             'Lines: %d / skipped objects: %d\n'
@@ -1569,12 +1675,17 @@ def diagnostics():
             'Last yaw/pitch: %.2f / %.2f degrees\n'
             'Capture/retain: 28 / 38 degrees\n'
             'Weapon detect: %s\n'
-            'Waiting: %s\nLast skipped object: %s\nError: %s' % (_esp_state, _aim_state, _ticks, _scanned,
-             len(_frame), _skipped, _fire_held, _target_id, _aim_writes,
-             _last_angles[0], _last_angles[1],
-             _weapon_debug or '(none)',
-             _waiting or '(none)',
-             _last_skip or '(none)', _last_error or '(none)'))
+            'AC Audit Anomalies: Kinematics: %d / Ballistics: %d\n'
+            'AC Last Anomaly: %s\n'
+            'Waiting: %s\nLast skipped object: %s\nError: %s' % (
+                _esp_state, _aim_state, _ticks, _scanned,
+                len(_frame), _skipped, _fire_held, _target_id, _aim_writes,
+                _last_angles[0], _last_angles[1],
+                _weapon_debug or '(none)',
+                sec['kinematic_anomalies'], sec['ballistic_anomalies'],
+                sec['last_anomaly'],
+                _waiting or '(none)',
+                _last_skip or '(none)', _last_error or '(none)'))
 
 
 print('[ROS Combat] %s ready; ESP/Aim disabled by default' % BUILD)
