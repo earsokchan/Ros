@@ -138,7 +138,7 @@ static id getDocumentsPath(const char *filename) {
                             if (docStr) {
                                 char fullPath[1024];
                                 snprintf(fullPath, sizeof(fullPath), "%s/%s", docStr, filename);
-                                return ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)strCls, sel("alloc")), sel("initWithUTF8String:"), fullPath);
+                                return ((id (*)(id, SEL, const char *))objc_msgSend)((id)strCls, sel("stringWithUTF8String:"), fullPath);
                             }
                         }
                     }
@@ -150,7 +150,7 @@ static id getDocumentsPath(const char *filename) {
     if (!home) home = "/var/mobile";
     char fullPath[1024];
     snprintf(fullPath, sizeof(fullPath), "%s/Documents/%s", home, filename);
-    return ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)cls("NSString"), sel("alloc")), sel("initWithUTF8String:"), fullPath);
+    return ((id (*)(id, SEL, const char *))objc_msgSend)((id)cls("NSString"), sel("stringWithUTF8String:"), fullPath);
 }
 
 // Ensures script is on disk and returns absolute path as NSString
@@ -204,7 +204,7 @@ static id ensureAndGetScriptPath(const char *filename, const unsigned char *data
         char buf[1024];
         snprintf(buf, sizeof(buf), "%s/%s", candPaths[i], filename);
         if (access(buf, R_OK) == 0) {
-            return ((id (*)(id, SEL, const char *))objc_msgSend)(((id (*)(id, SEL))objc_msgSend)((id)nsString, sel("alloc")), sel("initWithUTF8String:"), buf);
+            return ((id (*)(id, SEL, const char *))objc_msgSend)((id)nsString, sel("stringWithUTF8String:"), buf);
         }
     }
 
@@ -221,6 +221,8 @@ static int g_secSwizzleAnomalies = 0;
 static char g_secLastAnomaly[256] = "None";
 
 static void logSecurityEvent(const char *category, const char *severity, const char *fmt, ...) {
+    void *pool = objc_autoreleasePoolPush();
+
     char details[512];
     va_list args;
     va_start(args, fmt);
@@ -259,6 +261,8 @@ static void logSecurityEvent(const char *category, const char *severity, const c
             }
         }
     }
+
+    objc_autoreleasePoolPop(pool);
 }
 
 #define MAX_REPORTED_DYLIBS 128
